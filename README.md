@@ -33,9 +33,9 @@
 | `Ubuntu-26-KDE` | `ubuntu:26.04` | `min`、`conc`、`mobile`、`none` | 支持 | 支持 `nosnap`，推荐用于 Anland KDE。 |
 | `Fedora-43-KDE` | `fedora:43` | `min`、`conc`、`mobile`、`none` | 支持 | 某些设备需要启用硬件访问。 |
 | `Fedora-44-KDE` | `fedora:44` | `min`、`conc`、`mobile`、`none` | 支持 | 某些设备需要启用硬件访问。 |
-| `Arch-KDE` | `ogarcia/archlinux` | `min`、`conc`、`none` | 支持 | 使用 ARM64 Arch patched KWin/Xwayland；当前不建议使用本项目的 QEMU/binfmt 跨架构方案。 |
+| `Arch-KDE` | `ogarcia/archlinux` | `min`、`conc`、`mobile`、`none` | 支持 | 使用 ARM64 Arch patched KWin/Xwayland；当前不建议使用本项目的 QEMU/binfmt 跨架构方案。 |
 
-`all` 会构建全部 Dockerfile 模板。`all-wayland` 在 `min`、`conc` 模式下构建 `Debian-13-KDE`、`Ubuntu-26-KDE`、`Fedora-43-KDE`、`Fedora-44-KDE` 和 `Arch-KDE`；`mobile` 模式仍只构建前四项，并强制启用 Wayland 支持。
+`all` 会构建全部 Dockerfile 模板。`all-wayland` 在 `min`、`conc` 和 `mobile` 模式下构建 `Debian-13-KDE`、`Ubuntu-26-KDE`、`Fedora-43-KDE`、`Fedora-44-KDE` 和 `Arch-KDE`；`mobile` 模式会强制启用 Wayland 支持。
 
 ## 功能概览
 
@@ -238,6 +238,8 @@ Wayland 支持依赖 [anland](https://github.com/superturtlee/anland) 和 GitHub
 sudo ./scripts/install-anland-kde.sh
 ```
 
+启动后会按固定顺序测试 GitHub、`gh-proxy.com`、`ghproxy.net` 三个下载源；单个测试达到 2 秒会显示为超时，然后输入 `1`、`2` 或 `3` 选择下载源。选择第三方镜像时，下载的清单和归档都会以 GitHub Release API 公布的 SHA-256 digest 校验，因此需要系统具有 `jq`、`sha256sum`，且能访问 `api.github.com`。非交互场景可传入 `-1` 或 `--1` 直接使用 GitHub 并跳过测速；GitHub Actions 构建使用 `--1`。
+
 也可以直接获取安装器：
 
 ```bash
@@ -422,9 +424,9 @@ KDE 包只作为 GitHub Release 资产发布。手动运行 `build-kde-wayland.y
 
 ## 已知限制
 
-- Wayland/Anland 当前覆盖 Debian 13、Ubuntu 26、Fedora 43/44 和 Arch；Arch 仅支持 `min`、`conc`，不支持 `mobile`。
+- Wayland/Anland 当前覆盖 Debian 13、Ubuntu 26、Fedora 43/44 和 Arch。
 - Ubuntu 24 和 Ubuntu 25 当前按 X11 路径使用。
-- `mobile` 模式只允许 Debian 13、Ubuntu 26 和 Fedora 43/44。
+- `mobile` 模式支持 Debian 13、Ubuntu 26、Fedora 43/44 和 Arch。
 - 启用 Anland 后，工作流会关闭 PulseAudio 转发，因为 Anland App 自带音频路径。
 - Fedora 在部分设备上需要硬件访问，否则可能闪屏或崩溃。
 - Ubuntu 和 Debian 在未启用 `noseccomp` 或内核缺少 `USER_NS` 时，可能出现卡顿。

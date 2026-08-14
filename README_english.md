@@ -33,9 +33,9 @@ The goal is to reduce the amount of manual setup required to run a desktop Linux
 | `Ubuntu-26-KDE` | `ubuntu:26.04` | `min`, `conc`, `mobile`, `none` | Supported | Supports `nosnap`; recommended for Anland KDE. |
 | `Fedora-43-KDE` | `fedora:43` | `min`, `conc`, `mobile`, `none` | Supported | Some devices require hardware access to avoid flicker or crashes. |
 | `Fedora-44-KDE` | `fedora:44` | `min`, `conc`, `mobile`, `none` | Supported | Some devices require hardware access. |
-| `Arch-KDE` | `ogarcia/archlinux` | `min`, `conc`, `none` | Supported | Uses ARM64 Arch patched KWin/Xwayland; this project's QEMU/binfmt flow is not recommended for Arch at the moment. |
+| `Arch-KDE` | `ogarcia/archlinux` | `min`, `conc`, `mobile`, `none` | Supported | Uses ARM64 Arch patched KWin/Xwayland; this project's QEMU/binfmt flow is not recommended for Arch at the moment. |
 
-`all` builds every Dockerfile template. For `min` and `conc`, `all-wayland` builds `Debian-13-KDE`, `Ubuntu-26-KDE`, `Fedora-43-KDE`, `Fedora-44-KDE`, and `Arch-KDE`; `mobile` keeps the original four targets and forces Wayland on.
+`all` builds every Dockerfile template. For `min`, `conc`, and `mobile`, `all-wayland` builds `Debian-13-KDE`, `Ubuntu-26-KDE`, `Fedora-43-KDE`, `Fedora-44-KDE`, and `Arch-KDE`; `mobile` forces Wayland on.
 
 ## Feature Overview
 
@@ -238,6 +238,8 @@ Run it from the repository root:
 sudo ./scripts/install-anland-kde.sh
 ```
 
+On startup, the installer probes GitHub, `gh-proxy.com`, and `ghproxy.net` in that fixed order. A probe taking two seconds or longer is shown as a timeout; enter `1`, `2`, or `3` to choose a source. When a third-party mirror is selected, both the downloaded manifest and archive are verified against SHA-256 digests published by the GitHub Release API; this requires `jq`, `sha256sum`, and access to `api.github.com`. For non-interactive use, pass `-1` or `--1` to select GitHub directly and skip probing. GitHub Actions builds use `--1`.
+
 Or download the installer directly:
 
 ```bash
@@ -421,9 +423,9 @@ KDE packages are published only as GitHub Release assets. When running `build-kd
 
 ## Known Limitations
 
-- Wayland/Anland support covers Debian 13, Ubuntu 26, Fedora 43/44, and Arch; Arch supports only `min` and `conc`, not `mobile`.
+- Wayland/Anland support covers Debian 13, Ubuntu 26, Fedora 43/44, and Arch.
 - Ubuntu 24 and Ubuntu 25 currently use the X11 path.
-- `mobile` mode is allowed only on Debian 13, Ubuntu 26, and Fedora 43/44.
+- `mobile` mode is supported on Debian 13, Ubuntu 26, Fedora 43/44, and Arch.
 - When Anland is enabled, the workflow disables PulseAudio forwarding because the Anland app provides its own audio path.
 - Fedora may require hardware access on some devices to avoid flicker or crashes.
 - Ubuntu and Debian may lag or freeze if `noseccomp` is disabled or the kernel lacks `USER_NS`.

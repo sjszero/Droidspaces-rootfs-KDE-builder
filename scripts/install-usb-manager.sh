@@ -167,19 +167,19 @@ install_dependencies() {
             apt-get update
             apt-get install -y --no-install-recommends \
                 python3 python3-pyqt5 qtwayland5 libqt5svg5 udev util-linux sudo \
-                adb ntfs-3g exfatprogs desktop-file-utils \
+                adb ntfs-3g exfatprogs desktop-file-utils gvfs-backends gvfs-fuse kio-extras \
                 xdg-utils ca-certificates curl wget tar
             ;;
         dnf)
             dnf install -y --setopt=install_weak_deps=False \
                 python3 python3-qt5 qt5-qtwayland qt5-qtsvg systemd-udev util-linux sudo \
-                android-tools ntfs-3g exfatprogs desktop-file-utils \
+                android-tools ntfs-3g exfatprogs desktop-file-utils gvfs-mtp gvfs-fuse kio-extras \
                 xdg-utils ca-certificates curl wget tar
             ;;
         pacman)
             pacman -Syu --noconfirm --needed \
                 python python-pyqt5 qt5-wayland qt5-svg systemd util-linux sudo \
-                android-tools ntfs-3g exfatprogs desktop-file-utils \
+                android-tools ntfs-3g exfatprogs desktop-file-utils gvfs gvfs-mtp kio-extras \
                 xdg-utils ca-certificates curl wget tar
             ;;
     esac
@@ -274,8 +274,8 @@ install_program() {
     # Upstream currently assumes Debian's /usr/sbin path. /usr/bin is shared by
     # Debian/Ubuntu, Fedora, and Arch (including merged-/usr installations).
     # Keep upstream's X11 (xcb) backend preference to avoid Wayland compatibility issues.
+    # Note: blkid path is resolved dynamically at runtime (BLKID_CMD), no patch needed.
     sed -i \
-        -e 's|"/usr/sbin/blkid"|"/usr/bin/blkid"|g' \
         -e 's|"dolphin", path|"xdg-open", path|g' \
         -e 's|请运行: sudo apt install python3-pyqt5|请安装当前发行版的 PyQt5 软件包|g' \
         "$INSTALL_DIR/usb-manager.py"
@@ -328,14 +328,16 @@ StartupNotify=true
 EOF
 
     install -d -m 0755 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_HOME/Desktop"
+    # 若桌面快捷方式已是指向源文件的软链接，先删除再复制，避免 install 报 same file
+    if [ -L "$TARGET_HOME/Desktop/usb-manager.desktop" ]; then
+        rm -f -- "$TARGET_HOME/Desktop/usb-manager.desktop"
+    fi
     install -m 0755 -o "$TARGET_USER" -g "$TARGET_GROUP" \
         /usr/share/applications/usb-manager.desktop \
         "$TARGET_HOME/Desktop/usb-manager.desktop"
 }
 
 validate_program() {
-    grep -Fq '"/usr/bin/blkid"' "$INSTALL_DIR/usb-manager.py" || die \
-        "未能应用 blkid 路径补丁。" "The blkid path patch could not be applied."
     grep -Fq '"xdg-open", path' "$INSTALL_DIR/usb-manager.py" || die \
         "未能应用文件管理器兼容补丁。" "The file-manager compatibility patch could not be applied."
     grep -Fq "SUDOERS_FILE=\"$SUDOERS_FILE\"" "$INSTALL_DIR/usb-storage-passthrough.sh" || die \
@@ -353,9 +355,20 @@ configure_permissions() {
     local sudoers_tmp
     sudoers_tmp="$(mktemp -t droidspaces-usb-manager-sudoers.XXXXXXXX)"
 
+    # 让桌面用户加入 ntfsusb 组（gid 1023）。
+    # 新版 ntfs-3g (2026.x) 挂载的 NTFS 卷固定属主为 root:1023 770，
+    # 普通用户加入该组后可直接读写挂载点，无需走 pkexec 认证。
+    if command -v groupadd >/dev/null 2>&1; then
+        groupadd -g 1023 ntfsusb 2>/dev/null || true
+        usermod -a -G 1023 "${TARGET_USER}" 2>/dev/null || true
+        log "已将用户 ${TARGET_USER} 加入 ntfsusb 组。" \
+            "User ${TARGET_USER} has been added to the ntfsusb group."
+    fi
+
     cat > "$sudoers_tmp" <<EOF
 # Droidspaces USB Manager: device-node creation and removable-media mounting
-Cmnd_Alias DROIDSPACES_USB_MANAGER = /usr/bin/mount *, /usr/bin/umount *, /usr/bin/mknod *, /usr/bin/chmod *, /usr/bin/mkdir -p /dev/bus/usb/*, /usr/bin/blkid *, /usr/bin/bash ${INSTALL_DIR}/usb-passthrough.sh
+# blkid 同时授权 /usr/bin 与 /usr/sbin 两种布局（不同发行版/版本位置不同）
+Cmnd_Alias DROIDSPACES_USB_MANAGER = /usr/bin/mount *, /usr/bin/umount *, /usr/bin/mknod *, /usr/bin/chmod *, /usr/bin/mkdir -p /dev/bus/usb/*, /usr/bin/blkid *, /usr/sbin/blkid *, /usr/bin/bash ${INSTALL_DIR}/usb-passthrough.sh
 ${TARGET_USER} ALL=(root) NOPASSWD: DROIDSPACES_USB_MANAGER
 EOF
 
@@ -397,6 +410,8 @@ main() {
 
     log "安装完成。可从应用菜单或桌面快捷方式启动 USB Manager，也可运行 usb-manager。" \
         "Installation complete. Start USB Manager from the application menu or desktop shortcut, or run usb-manager."
+    log "已加入 ntfsusb 组，请注销重新登录（或重启容器）后生效。" \
+        "Added to the ntfsusb group; log out and back in (or restart the container) for it to take effect."
     log "导入 Droidspaces 容器时必须开启硬件访问。" \
         "Hardware access must be enabled when importing the Droidspaces container."
 }
