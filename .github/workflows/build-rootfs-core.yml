@@ -446,11 +446,23 @@ jobs:
         with:
           pattern: "*-rootfs"
           merge-multiple: true
-
       - name: ${{ inputs.ui_language == 'zh' && '整理发布文件' || 'Organize release files' }}
         run: |
           mkdir -p release_assets
           mv *.tar.xz release_assets/
+
+      # GitHub rejects any single release asset above 2 GiB, and the ArmadaOS
+      # image (Steam plus a full gamescope toolchain) exceeds that. Archives that
+      # fit are uploaded untouched; only oversized ones are split, because a
+      # split archive is less convenient to download.
+      - name: ${{ inputs.ui_language == 'zh' && '按 2G 上限分卷超限产物' || 'Split archives above the 2 GiB limit' }}
+        run: |
+          set -euo pipefail
+          # Leave headroom under the hard limit: GitHub counts the whole asset.
+          bash scripts/split-release-assets.sh --assets release_assets --limit $((1900 * 1024 * 1024))
+          echo '--- release assets ---'
+          ls -l release_assets/
+
 
       - name: ${{ inputs.ui_language == 'zh' && '生成发布说明' || 'Prepare Release notes' }}
         env:

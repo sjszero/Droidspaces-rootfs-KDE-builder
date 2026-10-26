@@ -48,7 +48,7 @@ display_backend_label() {
 
 target_is_known() {
     case "${1:-}" in
-        Debian-13|Ubuntu-24|Ubuntu-25|Ubuntu-26|Fedora-43|Fedora-44|Arch) return 0 ;;
+        Debian-13|Ubuntu-24|Ubuntu-25|Ubuntu-26|Fedora-43|Fedora-44|Arch|ArmadaOS) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -58,6 +58,16 @@ desktop_target_supported() {
     local desktop="${2:-}"
 
     target_is_known "$target" || return 1
+    # ArmadaOS already ships its own complete session stack (gamescope/Steam
+    # Big Picture plus Plasma). Installing another desktop profile on top would
+    # fight armada's session units, so only the stock stack and a plain CLI
+    # container are offered.
+    if [ "$target" = ArmadaOS ]; then
+        case "$desktop" in
+            none|kde) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
     case "$desktop" in
         none|kde) return 0 ;;
         kde-mobile)
@@ -88,6 +98,16 @@ desktop_backend_supported() {
     local backend="${3:-}"
 
     desktop_target_supported "$target" "$desktop" || return 1
+    # ArmadaOS ships its session stack and needs no extra Anland desktop layer
+    # for any backend it supports.
+    if [ "$target" = ArmadaOS ]; then
+        case "$desktop:$backend" in
+            none:x11) return 0 ;;
+            kde:x11) return 0 ;;
+            kde:anland-wayland) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
     case "$desktop:$backend" in
         none:x11) return 0 ;;
         kde:x11)
@@ -137,6 +157,9 @@ anland_archive_target() {
         Fedora-43) printf '%s\n' Fedora43 ;;
         Fedora-44) printf '%s\n' Fedora44 ;;
         Arch) printf '%s\n' Arch ;;
+        # ArmadaOS already carries armada's Anland build; the archive target is
+        # only used when the optional Droidspaces Anland overlay is requested.
+        ArmadaOS) printf '%s\n' ArmadaOS ;;
         *) return 1 ;;
     esac
 }

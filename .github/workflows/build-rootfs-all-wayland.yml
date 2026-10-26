@@ -121,6 +121,17 @@ jobs:
           merge-multiple: true
           path: release-assets
 
+      # GitHub rejects any single release asset above 2 GiB. Archives that fit
+      # are published untouched; only oversized ones are split into parts.
+      # This runs before the manifests are generated so they can describe the
+      # published form of each image.
+      - name: 按 2G 上限分卷超限产物
+        run: |
+          set -euo pipefail
+          bash scripts/split-release-assets.sh --assets release-assets --limit $((1900 * 1024 * 1024))
+          echo '--- release assets ---'
+          ls -l release-assets/ | head -20
+
       - name: 生成双语索引
         env:
           BUILD_ID: ${{ needs.prepare.outputs.build_id }}
@@ -212,9 +223,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mapfile -t archives < <(find release-assets -maxdepth 1 -type f -name '*.tar.xz' -print | sort)
-          [ "${#archives[@]}" -eq 80 ]
-          gh release upload "$RELEASE_TAG" "${archives[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          # Archives are either a whole .tar.xz or a set of .part-NN files plus
+          # the .parts and .sha256 sidecars. Count images, not files, so a split
+          # image still counts once.
+          mapfile -t images < <(find release-assets -maxdepth 1 -type f \
+            \( -name '*.tar.xz' -o -name '*.tar.xz.sha256' \) -print | sort)
+          [ "${#images[@]}" -eq 80 ]
+          # Upload everything the release publishes: archives, parts, sidecars.
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f \
+            ! -name 'rootfs*.json' -print | sort)
+          [ "${#assets[@]}" -ge 80 ]
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           gh release upload "$RELEASE_TAG" \
             release-assets/rootfs.json \
             release-assets/rootfs_zh.json release-assets/rootfs_en.json \

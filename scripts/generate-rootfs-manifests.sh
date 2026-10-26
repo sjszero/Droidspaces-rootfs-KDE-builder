@@ -79,9 +79,22 @@ RELEASE_URL="${RELEASE_URL%/}"
 entries='[]'
 count=0
 shopt -s nullglob
-for path in "$ASSETS_DIR"/*.tar.xz; do
-  file="${path##*/}"
+# An image is published either as a whole <name>.tar.xz or, when it exceeds the
+# GitHub Release asset limit, as <name>.tar.xz.part-NN pieces with a
+# <name>.tar.xz.parts list and a <name>.tar.xz.sha256 sidecar. Both forms must
+# resolve to the same logical image so the manifest stays complete.
+declare -A images=()
+for path in "$ASSETS_DIR"/*.tar.xz "$ASSETS_DIR"/*.tar.xz.sha256; do
+  base="${path##*/}"
+  images["${base%.sha256}"]=1
+done
+mapfile -t image_names < <(printf '%s\n' "${!images[@]}" | sort)
+for file in "${image_names[@]}"; do
+  # Each language has its own manifest; never mix the two.
   [[ "$file" == *-"$LANGUAGE".tar.xz ]] || continue
+  path="$ASSETS_DIR/$file"
+  split=false
+  [[ -f "$path" ]] || split=true
   stem="${file%.tar.xz}"
   rest="${stem#*-}"
   distro="${file%%-*}"
@@ -97,8 +110,25 @@ for path in "$ASSETS_DIR"/*.tar.xz; do
   version_lang="${middle#${arch}-}"
   version="${version_lang%-${LANGUAGE}}"
   [[ -n "$version" && -n "$arch" ]] || continue
-  sha256="$(sha256sum "$path" | awk '{print $1}')"
-  size_bytes="$(wc -c < "$path")"
+  if [[ "$split" == true ]]; then
+    # The sidecar records the hash and size of the original archive, so the
+    # manifest keeps describing the image a user ends up with after joining
+    # the parts. size_bytes is the sum of the parts.
+    sha256="$(awk '{print $1}' "$ASSETS_DIR/$file.sha256")"
+    size_bytes=0
+    while IFS= read -r part; do
+      [[ -n "$part" ]] || continue
+      size_bytes=$((size_bytes + $(wc -c < "$ASSETS_DIR/$part")))
+    done < "$ASSETS_DIR/$file.parts"
+    [[ -n "$sha256" ]] || { echo "缺少分卷校验值：$file" >&2; exit 1; }
+    # No single archive exists on the release for a split image, so point at the
+    # ordered part list instead; the checksum still verifies the joined result.
+    download_url="$RELEASE_URL/$file.parts"
+  else
+    sha256="$(sha256sum "$path" | awk '{print $1}')"
+    size_bytes="$(wc -c < "$path")"
+    download_url="$RELEASE_URL/$file"
+  fi
   if [[ "$LANGUAGE" == zh ]]; then
     name="${distro_name[$distro]} - ${desktop_label[$desktop]}（Anland Wayland）"
     description="${distro_detail_zh[$distro]}；${desktop_detail_zh[$desktop]}。镜像已配置 Droidspaces 桌面自启动，并启用高通 Adreno/Mesa 支持。"
@@ -111,10 +141,11 @@ for path in "$ASSETS_DIR"/*.tar.xz; do
     --arg name "$name" --arg distro "${distro_id[$distro]}" \
     --arg description "$description" --arg architecture "$arch" \
     --arg language "$LANGUAGE" --arg file "$stem" \
-    --arg download_url "$RELEASE_URL/$file" --arg sha256 "$sha256" \
+    --arg download_url "$download_url" --arg sha256 "$sha256" \
     --arg version "$version" --arg build_date "${version#v}" \
     --argjson size_bytes "$size_bytes" \
-    '{author:$author,name:$name,distro:$distro,description:$description,architecture:$architecture,language:$language,file:$file,download_url:$download_url,sha256:$sha256,size_bytes:$size_bytes,version:$version,build_date:($build_date|split("-")[0])}')"
+    --argjson split "$split" \
+    '{author:$author,name:$name,distro:$distro,description:$description,architecture:$architecture,language:$language,file:$file,download_url:$download_url,sha256:$sha256,size_bytes:$size_bytes,version:$version,build_date:($build_date|split("-")[0])} + (if $split then {split:true,parts_url:$download_url} else {} end)')"
   entries="$(jq --argjson entry "$entry" '. + [$entry]' <<<"$entries")"
   count=$((count + 1))
 done
