@@ -121,6 +121,26 @@ jobs:
           merge-multiple: true
           path: release-assets
 
+      # GitHub rejects any single release asset above 2 GiB. Archives that fit
+      # are published untouched; oversized ones are wrapped in ZIP volumes.
+      # This runs before the manifests are generated so they can describe the
+      # published form of each image.
+      - name: 将超限 tar.xz 打包为 ZIP 分卷
+        run: |
+          set -euo pipefail
+          packages=()
+          command -v zip >/dev/null 2>&1 || packages+=(zip)
+          if ! command -v 7zz >/dev/null 2>&1 && ! command -v 7z >/dev/null 2>&1; then
+            packages+=(7zip)
+          fi
+          if (( ${#packages[@]} )); then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "${packages[@]}"
+          fi
+          bash scripts/split-release-assets.sh --assets release-assets --limit $((1900 * 1024 * 1024))
+          echo '--- release assets ---'
+          ls -l release-assets/ | sed -n '1,20p'
+
       - name: 生成双语索引
         env:
           BUILD_ID: ${{ needs.prepare.outputs.build_id }}
@@ -151,6 +171,8 @@ jobs:
 
           Each combination is available in Chinese and English, for 80 `.tar.xz` archives in total. Use `rootfs_en.json` or `rootfs_zh.json` as the subscription manifest in Droidspaces RootFS management. The manifests include version, file size, SHA-256 checksum, and download URL for each image.
 
+          Archives above 1900 MiB are published as `.tar.xz.zip.001`, `.002`, etc. Download every volume into one directory and extract `.zip.001` with 7-Zip to recover the original `.tar.xz`. The `.parts` file lists the volumes; `.sha256` verifies the recovered archive.
+
           The images are built for ARM64 and include Droidspaces desktop auto-start and Qualcomm Adreno/Mesa support. This rolling release is refreshed by the scheduled weekly build.
 
           ## 中文
@@ -160,6 +182,8 @@ jobs:
           - Anland Wayland 桌面：KDE Plasma、KDE Plasma Mobile、GNOME、Anland Next、Niri、Hyprland、Mango 和 Denial。
 
           每种组合均提供中文和英文版本，共 80 个 `.tar.xz` 压缩包。在 Droidspaces RootFS 管理中添加 `rootfs_zh.json` 或 `rootfs_en.json` 订阅清单即可。清单包含每个镜像的版本、文件大小、SHA-256 校验值和下载地址。
+
+          超过 1900 MiB 的压缩包以 `.tar.xz.zip.001`、`.002` 等分卷发布。下载同名的全部分卷并放在同一目录，用 7-Zip 解压 `.zip.001` 得到原始 `.tar.xz`。`.parts` 列出分卷顺序，`.sha256` 校验解压所得的包。
 
           镜像面向 ARM64 构建，包含 Droidspaces 桌面自动启动配置和高通 Adreno/Mesa 支持。本滚动 Release 由每周定时构建更新。
           EOF
@@ -212,9 +236,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mapfile -t archives < <(find release-assets -maxdepth 1 -type f -name '*.tar.xz' -print | sort)
-          [ "${#archives[@]}" -eq 80 ]
-          gh release upload "$RELEASE_TAG" "${archives[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          # Archives are either a whole .tar.xz or .tar.xz.zip.001, .002, ...
+          # volumes with .parts/.sha256/.size sidecars. Count images, so a split
+          # image still counts once.
+          mapfile -t images < <(find release-assets -maxdepth 1 -type f \
+            \( -name '*.tar.xz' -o -name '*.tar.xz.sha256' \) -print | sort)
+          [ "${#images[@]}" -eq 80 ]
+          # Upload everything the release publishes: archives, parts, sidecars.
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f \
+            ! -name 'rootfs*.json' -print | sort)
+          [ "${#assets[@]}" -ge 80 ]
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           gh release upload "$RELEASE_TAG" \
             release-assets/rootfs.json \
             release-assets/rootfs_zh.json release-assets/rootfs_en.json \
