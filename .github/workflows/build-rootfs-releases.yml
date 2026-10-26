@@ -16,6 +16,7 @@ on:
           - Fedora-43
           - Fedora-44
           - Arch
+          - ArmadaOS
           - all
           - all-wayland
       custom_username:

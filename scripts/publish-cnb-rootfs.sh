@@ -272,15 +272,22 @@ if [[ -n "${CNB_LOCAL_ASSETS_DIR:-}" ]]; then
     release_prerelease=false
     mapfile -t expected_assets < <(
         find "$local_assets_dir" -maxdepth 1 -type f \
-            \( -name '*-zh.tar.xz' -o -name 'rootfs_zh.json' -o -name 'rootfs.json' \) \
+            \( -name '*-zh.tar.xz' -o -name '*-zh.tar.xz.part-*' \
+               -o -name '*-zh.tar.xz.zip.[0-9]*' -o -name '*-zh.tar.xz.size' \
+               -o -name '*-zh.tar.xz.parts' -o -name '*-zh.tar.xz.sha256' \
+               -o -name 'rootfs_zh.json' -o -name 'rootfs.json' \) \
             -printf '%f\n' | sort
     )
+    # Count images, not files: a split image contributes several parts but is
+    # still one RootFS.
     archive_count=0
     for asset_name in "${expected_assets[@]}"; do
-        [[ "$asset_name" == *-zh.tar.xz ]] && archive_count=$((archive_count + 1))
+        if [[ "$asset_name" == *-zh.tar.xz || "$asset_name" == *-zh.tar.xz.sha256 ]]; then
+            archive_count=$((archive_count + 1))
+        fi
     done
     if [[ "$archive_count" -ne 40 || ! -f "$local_assets_dir/rootfs_zh.json" || ! -f "$local_assets_dir/rootfs.json" ]]; then
-        echo "本地 CNB 资产不完整：需要 40 个中文压缩包及 rootfs_zh.json、rootfs.json。" >&2
+        echo "本地 CNB 资产不完整：需要 40 个中文镜像（含分卷）及 rootfs_zh.json、rootfs.json。" >&2
         exit 1
     fi
 else
@@ -302,6 +309,7 @@ else
         | select(
             $language != "zh" or
             endswith("-zh.tar.xz") or
+            test("-zh\\.tar\\.xz\\.(part-[0-9]+|parts|sha256|size|zip\\.[0-9]{3,})$") or
             . == "rootfs_zh.json" or
             . == "rootfs.json"
           )
@@ -355,8 +363,25 @@ if [[ "${CNB_ROOTFS_LANGUAGE:-}" == zh ]]; then
         echo "中文 RootFS Release 缺少 rootfs_zh.json。" >&2
         exit 1
     }
+    # A split image has no single archive on the release, so its manifest URL
+    # must point at the .parts index (the ordered ZIP volume list) instead. Every
+    # other image keeps the plain archive URL. jq cannot stat files, so collect
+    # the split names here and pass them in.
+    split_index="$work_dir/cnb-split-images.txt"
+    ( cd "$asset_dir" && ls -1 *.tar.xz.parts 2>/dev/null | sed 's/\.parts$//' ) \
+        > "$split_index" || true
     jq --arg base "https://cnb.cool/$CNB_RELEASE_REPOSITORY/-/releases/download/$RELEASE_TAG" \
-        'map(.download_url = ($base + "/" + (.file + ".tar.xz")))' \
+        --rawfile split "$split_index" '
+        ($split | split("\n") | map(select(length > 0))) as $split_images
+        | map(
+            (.file + ".tar.xz") as $whole
+            | .download_url =
+                if ($split_images | index($whole)) != null
+                then $base + "/" + $whole + ".parts"
+                else $base + "/" + $whole
+                end
+            | if .split == true then .parts_url = .download_url else . end
+          )' \
         "$manifest" > "$manifest.tmp"
     mv "$manifest.tmp" "$manifest"
     jq . "$manifest" > "$asset_dir/rootfs.json.tmp"
