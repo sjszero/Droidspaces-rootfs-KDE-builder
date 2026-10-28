@@ -27,7 +27,9 @@
 
 ## 支持范围
 
-构建目标：`Debian-13`、`Ubuntu-24`、`Ubuntu-25`、`Ubuntu-26`、`Fedora-43`、`Fedora-44`、`Arch`。GNOME、Niri、Hyprland、Mango 和 Denial 支持 Debian 13、Ubuntu 26、Fedora 43/44 与 Arch Linux ARM。桌面及显示后端的完整兼容矩阵见[构建选项](docs/zh/构建选项.md)。
+构建目标：`Debian-13`、`Ubuntu-24`、`Ubuntu-25`、`Ubuntu-26`、`Fedora-43`、`Fedora-44`、`Arch`、`ArmadaOS`。GNOME、Niri、Hyprland、Mango 和 Denial 支持 Debian 13、Ubuntu 26、Fedora 43/44 与 Arch Linux ARM。桌面及显示后端的完整兼容矩阵见[构建选项](docs/zh/构建选项.md)。
+
+`ArmadaOS` 与其他目标不同：它直接以 armada 项目发布的 bootc 镜像为基础（`ghcr.io/armada-os/armada:testing`），而不是从 `fedora:44` 加装 RPM 组装。armada 的 rootfs 由约 30 个独立发布的包镜像构建，在本仓库复刻会与上游静默漂移，因此这里只做容器化改造：剥离 bootc/OSTree/EFI/内核启动状态、屏蔽依赖真实硬件的 armada 服务、加入与其他模板一致的 Droidspaces 兼容层（aid_inet 组、journald、NAT DHCP、udev 只读修复等）。由于 ArmadaOS 自带完整的 gamescope/Steam 大屏会话与 Plasma 桌面，它只支持 `KDE` 与 `none` 两种桌面输入；如需用 Droidspaces 的 Anland 包替换 armada 自带构建，额外传 `--build-arg ENABLE_ANLAND_OVERLAY=true`。
 
 ## 致谢
 

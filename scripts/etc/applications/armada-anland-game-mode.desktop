@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Armada Anland Game Mode
+# The real entry ships in /usr/share/applications from
+# terra-gamescope-anland-session: it runs `armada-anland-game-mode`, which
+# `exec`s /usr/libexec/gamescope-anland/startup.sh and just starts a nested
+# gamescope over whatever session is already running. In the container that does
+# nothing observable.
+#
+# Deleting the packaged file would be undone by the next package update, so the
+# entry is hidden the freedesktop way instead: an identically named file in a
+# higher-priority data directory with Hidden=true. /usr/local/share precedes
+# /usr/share in the default XDG_DATA_DIRS, so this one wins and the menu drops
+# the original. Switching to Big Picture goes through 切换到大屏幕模式
+# (container-request) instead, which performs the real session handover.
+Hidden=true

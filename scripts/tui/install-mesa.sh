@@ -342,17 +342,22 @@ media_driver_install_dir_for_target() {
 }
 
 detect_target() {
-    [[ -r /etc/os-release ]] || die \
-        "无法读取 /etc/os-release。" "Unable to read /etc/os-release."
+    local os_release="${1:-/etc/os-release}"
+    [[ -r "$os_release" ]] || die \
+        "无法读取 ${os_release}。" "Unable to read ${os_release}."
 
-    # shellcheck disable=SC1091
-    source /etc/os-release
+    # shellcheck disable=SC1090
+    source "$os_release"
     [[ -n "${ID:-}" ]] || die \
-        "/etc/os-release 缺少 ID。" "/etc/os-release does not contain ID."
+        "${os_release} 缺少 ID。" "${os_release} does not contain ID."
 
     local distro_id="${ID,,}"
     local version_id="${VERSION_ID:-}"
     local system_name="${PRETTY_NAME:-$distro_id${version_id:+ $version_id}}"
+    # Armada retains Fedora VERSION_ID and ABI; use its versioned driver archive.
+    if [[ "$distro_id" == armada ]]; then
+        distro_id=fedora
+    fi
 
     TARGET=""
     PACKAGE_MANAGER=""

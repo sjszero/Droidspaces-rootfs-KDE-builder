@@ -446,11 +446,32 @@ jobs:
         with:
           pattern: "*-rootfs"
           merge-multiple: true
-
       - name: ${{ inputs.ui_language == 'zh' && '整理发布文件' || 'Organize release files' }}
         run: |
           mkdir -p release_assets
           mv *.tar.xz release_assets/
+
+      # GitHub rejects any single release asset above 2 GiB, and the ArmadaOS
+      # image (Steam plus a full gamescope toolchain) exceeds that. Archives that
+      # fit are uploaded untouched; oversized ones are wrapped in ZIP volumes
+      # containing the original .tar.xz file.
+      - name: ${{ inputs.ui_language == 'zh' && '将超限 tar.xz 打包为 ZIP 分卷' || 'Pack oversized tar.xz files into ZIP volumes' }}
+        run: |
+          set -euo pipefail
+          # Leave headroom under the hard limit: GitHub counts the whole asset.
+          packages=()
+          command -v zip >/dev/null 2>&1 || packages+=(zip)
+          if ! command -v 7zz >/dev/null 2>&1 && ! command -v 7z >/dev/null 2>&1; then
+            packages+=(7zip)
+          fi
+          if (( ${#packages[@]} )); then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "${packages[@]}"
+          fi
+          bash scripts/split-release-assets.sh --assets release_assets --limit $((1900 * 1024 * 1024))
+          echo '--- release assets ---'
+          ls -l release_assets/
+
 
       - name: ${{ inputs.ui_language == 'zh' && '生成发布说明' || 'Prepare Release notes' }}
         env:
@@ -530,6 +551,16 @@ jobs:
           - Development Tools Integration: $ENABLE_DEV_TOOLS
           - Compression Tools Integration: $ENABLE_COMPRESSION
           - Docker Integration: $ENABLE_DOCKER
+          EOF
+          fi
+          if compgen -G 'release_assets/*.zip.001' >/dev/null; then
+            cat >> release-notes.md <<'EOF'
+
+          ### ZIP 分卷 / ZIP volumes
+
+          大文件以 `.tar.xz.zip.001`、`.002` 等分卷发布，每卷不超过 1900 MiB。下载同名的全部分卷并放在同一目录，用 7-Zip 解压 `.zip.001`，得到原始 `.tar.xz`，再导入 Droidspaces。`.parts` 列出分卷顺序，`.sha256` 校验解压所得的 `.tar.xz`。
+
+          Large archives are published as `.tar.xz.zip.001`, `.002`, etc., with each volume at most 1900 MiB. Download every volume into one directory and extract `.zip.001` with 7-Zip to recover the original `.tar.xz` for Droidspaces. The `.parts` file lists the volumes; `.sha256` verifies the recovered `.tar.xz`.
           EOF
           fi
 

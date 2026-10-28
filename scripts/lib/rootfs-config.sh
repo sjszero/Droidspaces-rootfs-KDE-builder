@@ -3,7 +3,7 @@
 write_rootfs_config() {
     local output="${1:?}" desktop="${2:?}" backend="${3:?}"
     local audio="${4:?}" docker_enabled="${5:?}" gpu_enabled="${6:?}"
-    local zh_tz_enabled="${7:-false}"
+    local zh_tz_enabled="${7:-false}" target="${8:-}"
     local anland=0 x11=0 pulse=0 userns=0 gpu=0
 
     case "$desktop" in none|kde|kde-mobile|gnome|anland-next|niri|hyprland|mango|denial) ;; *) return 1 ;; esac
@@ -29,7 +29,9 @@ write_rootfs_config() {
         if [[ "$docker_enabled" == true ]]; then
             printf '%s\n' 'net_mode=nat'
         fi
-        if [[ "$desktop" == anland-next ]]; then
+        if [[ "$target" == ArmadaOS ]]; then
+            printf '%s\n' 'bind_mounts=/dev/input:/dev/input:ro'
+        elif [[ "$desktop" == anland-next ]]; then
             printf '%s\n' 'bind_mounts=/data/local/tmp/awl:/run/anland'
         fi
     } > "$output"

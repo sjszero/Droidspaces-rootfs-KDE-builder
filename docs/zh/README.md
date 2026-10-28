@@ -8,6 +8,7 @@
 - [构建选项与发行版兼容性](构建选项.md)
 - [桌面启动与 Anland Wayland 配置](桌面与Anland.md)
 - [TUI、USB、固件与本地构建](进阶使用.md)
+- [ArmadaOS 容器维护与环境基线](ArmadaOS维护.md)
 - [脚本维护说明](../../scripts/README.md)
 
 ## 桌面截图
