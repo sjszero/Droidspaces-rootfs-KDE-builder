@@ -1,0 +1,58 @@
+#!/usr/bin/bash
+# Container replacement for the base image's session-control.
+#
+# The base helper writes /etc/sddm.conf.d/zz-holo-autologin.conf and then
+# restarts sddm.service, and it reads the desktop/mobile preference from
+# /var/home/armada/.config/steamos-manager/state.toml. In a Droidspaces
+# container the hardware account has no user manager, that state file does not
+# exist, and restarting sddm alone leaves the previous compositor holding the
+# GPU. Armada Store still calls this path, so route it through the container
+# session worker, which stops the user units first and reads the container
+# preference file.
+set -u
+
+SESSION_USER=__DS_USER__
+REQUEST=/usr/libexec/armada/container-request
+ACTION=/usr/libexec/armada/container-action
+
+usage() {
+    printf 'usage: %s {switch-desktop|switch-gamemode}\n' "$0" >&2
+    exit 2
+}
+
+if [[ ! -r /run/systemd/container || $(< /run/systemd/container) != droidspaces ]]; then
+    printf '%s\n' 'session-control: this entrypoint is only for a Droidspaces container' >&2
+    exit 1
+fi
+
+case ${1:-} in
+    desktop|switch-desktop) mode=desktop ;;
+    gamemode|switch-gamemode|switch-game-mode) mode=gamemode ;;
+    default-desktop) mode=default-desktop ;;
+    default-gamemode) mode=default-gamemode ;;
+    *) usage ;;
+esac
+
+# The boot hotkeys run as root and only republish the default for the next
+# boot; that needs no session teardown, so it stays on the worker directly.
+if [[ $mode == default-* ]]; then
+    if (( EUID != 0 )); then
+        printf '%s\n' 'session-control: only root may set the boot default' >&2
+        exit 1
+    fi
+    exec "$ACTION" "$mode"
+fi
+
+# container-request only accepts the container user, so a root caller (Armada
+# Store runs inside the root PluginLoader) has to drop privileges first.
+if (( EUID == 0 )); then
+    exec /usr/sbin/runuser -u "$SESSION_USER" -- /usr/bin/env \
+        USER="$SESSION_USER" LOGNAME="$SESSION_USER" "$REQUEST" "$mode"
+fi
+
+if [[ ${USER:-} != "$SESSION_USER" ]]; then
+    printf '%s\n' 'session-control: refusing request from an unexpected user' >&2
+    exit 1
+fi
+
+exec "$REQUEST" "$mode"

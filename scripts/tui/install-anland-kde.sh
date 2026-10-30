@@ -324,14 +324,18 @@ require_root() {
 }
 
 detect_target() {
-    [[ -r /etc/os-release ]] || die "无法读取 /etc/os-release。" "Unable to read /etc/os-release."
-
-    # shellcheck disable=SC1091
-    source /etc/os-release
+    local os_release="${ANLAND_KDE_OS_RELEASE:-/etc/os-release}"
+    [[ -r "$os_release" ]] || die "无法读取 /etc/os-release。" "Unable to read /etc/os-release."
+    # shellcheck disable=SC1090,SC1091
+    source "$os_release"
     [[ -n "${ID:-}" ]] || die "/etc/os-release 缺少 ID。" "/etc/os-release does not contain ID."
     local distro_id="${ID,,}"
     local version_id="${VERSION_ID:-}"
     local system_name="${PRETTY_NAME:-$distro_id${version_id:+ $version_id}}"
+    # Armada retains the Fedora VERSION_ID and RPM ABI; use its kwin archive.
+    if [[ "$distro_id" == armada ]]; then
+        distro_id=fedora
+    fi
 
     case "$distro_id" in
         arch|archarm)

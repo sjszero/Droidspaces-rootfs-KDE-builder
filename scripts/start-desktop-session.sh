@@ -8,7 +8,7 @@ source "$config"
 case "${DESKTOP:-}:${DISPLAY_BACKEND:-}" in
     none:x11) command_line='exit 0' ;;
     kde:x11) command_line='export DISPLAY="${DISPLAY:-:5}"; exec startplasma-x11' ;;
-    kde:anland-wayland) command_line='exec startplasma-wayland' ;;
+    kde:anland-wayland) command_line='exec dbus-run-session startplasma-wayland' ;;
     kde-mobile:anland-wayland) command_line='exec startplasmamobile' ;;
     gnome:anland-wayland) command_line='exec gnome-session --session=gnome' ;;
     # Anland Next 的会话本体就是包内的 anland-session（会话 D-Bus + wayland

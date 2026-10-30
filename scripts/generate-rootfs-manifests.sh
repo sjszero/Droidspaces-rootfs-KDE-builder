@@ -79,9 +79,23 @@ RELEASE_URL="${RELEASE_URL%/}"
 entries='[]'
 count=0
 shopt -s nullglob
-for path in "$ASSETS_DIR"/*.tar.xz; do
-  file="${path##*/}"
+# An image is published either as a whole <name>.tar.xz or, when it exceeds the
+# GitHub Release asset limit, inside <name>.tar.xz.zip.001, .002, ... volumes.
+# The .parts list describes transport; .sha256 and .size describe the original
+# .tar.xz recovered by ZIP extraction. Legacy raw .part-NN lists remain readable.
+declare -A images=()
+for path in "$ASSETS_DIR"/*.tar.xz "$ASSETS_DIR"/*.tar.xz.sha256; do
+  base="${path##*/}"
+  images["${base%.sha256}"]=1
+done
+mapfile -t image_names < <(printf '%s\n' "${!images[@]}" | sort)
+for file in "${image_names[@]}"; do
+  # Each language has its own manifest; never mix the two.
   [[ "$file" == *-"$LANGUAGE".tar.xz ]] || continue
+  path="$ASSETS_DIR/$file"
+  split=false
+  split_format=raw
+  [[ -f "$path" ]] || split=true
   stem="${file%.tar.xz}"
   rest="${stem#*-}"
   distro="${file%%-*}"
@@ -97,8 +111,40 @@ for path in "$ASSETS_DIR"/*.tar.xz; do
   version_lang="${middle#${arch}-}"
   version="${version_lang%-${LANGUAGE}}"
   [[ -n "$version" && -n "$arch" ]] || continue
-  sha256="$(sha256sum "$path" | awk '{print $1}')"
-  size_bytes="$(wc -c < "$path")"
+  if [[ "$split" == true ]]; then
+    [[ -s "$ASSETS_DIR/$file.parts" ]] || { echo "missing volume list: $file" >&2; exit 1; }
+    sha256="$(awk '{print $1}' "$ASSETS_DIR/$file.sha256")"
+    [[ "$sha256" =~ ^[[:xdigit:]]{64}$ ]] || { echo "invalid archive hash: $file" >&2; exit 1; }
+    transport_bytes=0
+    part_count=0
+    while IFS= read -r part; do
+      [[ -n "$part" ]] || continue
+      part_count=$((part_count + 1))
+      printf -v expected_zip '%s.zip.%03d' "$file" "$part_count"
+      if [[ "$part" == "$expected_zip" ]]; then
+        [[ "$split_format" == zip || "$part_count" == 1 ]] || { echo "mixed volume formats: $file" >&2; exit 1; }
+        split_format=zip
+      elif [[ "$split_format" == zip || "$part" != "$file.part-"* || "$part" == */* ]]; then
+        echo "invalid or out-of-order volume: $part" >&2
+        exit 1
+      fi
+      [[ -s "$ASSETS_DIR/$part" ]] || { echo "missing volume: $part" >&2; exit 1; }
+      transport_bytes=$((transport_bytes + $(stat -c %s "$ASSETS_DIR/$part")))
+    done < "$ASSETS_DIR/$file.parts"
+    (( part_count > 0 )) || { echo "empty volume list: $file" >&2; exit 1; }
+    if [[ "$split_format" == zip ]]; then
+      # ZIP headers add bytes: summing volumes is not the original .tar.xz size.
+      size_bytes="$(cat "$ASSETS_DIR/$file.size")"
+      [[ "$size_bytes" =~ ^[1-9][0-9]*$ ]] || { echo "invalid archive size: $file" >&2; exit 1; }
+    else
+      size_bytes="$transport_bytes"
+    fi
+    download_url="$RELEASE_URL/$file.parts"
+  else
+    sha256="$(sha256sum "$path" | awk '{print $1}')"
+    size_bytes="$(wc -c < "$path")"
+    download_url="$RELEASE_URL/$file"
+  fi
   if [[ "$LANGUAGE" == zh ]]; then
     name="${distro_name[$distro]} - ${desktop_label[$desktop]}（Anland Wayland）"
     description="${distro_detail_zh[$distro]}；${desktop_detail_zh[$desktop]}。镜像已配置 Droidspaces 桌面自启动，并启用高通 Adreno/Mesa 支持。"
@@ -111,10 +157,11 @@ for path in "$ASSETS_DIR"/*.tar.xz; do
     --arg name "$name" --arg distro "${distro_id[$distro]}" \
     --arg description "$description" --arg architecture "$arch" \
     --arg language "$LANGUAGE" --arg file "$stem" \
-    --arg download_url "$RELEASE_URL/$file" --arg sha256 "$sha256" \
+    --arg download_url "$download_url" --arg sha256 "$sha256" \
     --arg version "$version" --arg build_date "${version#v}" \
     --argjson size_bytes "$size_bytes" \
-    '{author:$author,name:$name,distro:$distro,description:$description,architecture:$architecture,language:$language,file:$file,download_url:$download_url,sha256:$sha256,size_bytes:$size_bytes,version:$version,build_date:($build_date|split("-")[0])}')"
+    --argjson split "$split" --arg split_format "$split_format" \
+    '{author:$author,name:$name,distro:$distro,description:$description,architecture:$architecture,language:$language,file:$file,download_url:$download_url,sha256:$sha256,size_bytes:$size_bytes,version:$version,build_date:($build_date|split("-")[0])} + (if $split then {split:true,split_format:$split_format,parts_url:$download_url} else {} end)')"
   entries="$(jq --argjson entry "$entry" '. + [$entry]' <<<"$entries")"
   count=$((count + 1))
 done

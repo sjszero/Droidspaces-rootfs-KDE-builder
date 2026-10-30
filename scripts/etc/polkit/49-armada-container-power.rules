@@ -1,0 +1,41 @@
+// A Droidspaces container has no power key, no VT and no polkit authentication
+// agent inside the desktop session. KDE's and Steam's shutdown buttons both go
+// through logind on the system bus, whose default policy is auth_admin_keep, so
+// they either get refused or sit waiting for a password nobody can supply.
+//
+// Everything logind can reach here is this container's own PID 1: the Android
+// host is in a different kernel namespace and is never signalled. Allowing the
+// container's own user to power off / reboot is therefore equivalent to letting
+// them close their own session, which is what the buttons promise.
+//
+// The rule deliberately does not test subject.active: pam_systemd cannot
+// register a session in this container (io.systemd.Login.CreateSession returns
+// InvalidParameter because there is no VT), so loginctl lists no session for the
+// desktop user and every subject would look inactive. Membership of wheel is the
+// condition instead, which is no broader than the container itself.
+polkit.addRule(function(action, subject) {
+    var sessionActions = [
+        "org.freedesktop.login1.power-off",
+        "org.freedesktop.login1.power-off-multiple-sessions",
+        "org.freedesktop.login1.power-off-ignore-inhibit",
+        "org.freedesktop.login1.reboot",
+        "org.freedesktop.login1.reboot-multiple-sessions",
+        "org.freedesktop.login1.reboot-ignore-inhibit",
+        "org.freedesktop.login1.suspend",
+        "org.freedesktop.login1.suspend-multiple-sessions",
+        "org.freedesktop.login1.suspend-ignore-inhibit",
+        "org.freedesktop.login1.hibernate",
+        "org.freedesktop.login1.hibernate-multiple-sessions",
+        "org.freedesktop.login1.hibernate-ignore-inhibit"
+    ];
+
+    if (sessionActions.indexOf(action.id) < 0) {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    if (subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+
+    return polkit.Result.NOT_HANDLED;
+});
