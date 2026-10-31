@@ -22,7 +22,8 @@ This directory contains installers used while building the RootFS, maintenance t
 | `tui/install-anland-niri.sh` | ARM64 Debian 13, Ubuntu 26, Fedora 43/44, and Arch container | Installs Anland Niri and its shared patched Xwayland package. |
 | `tui/install-anland-hyprland.sh`, `install-anland-mango.sh`, `install-anland-denial.sh` | ARM64 Debian 13, Ubuntu 26, Fedora 43/44, and Arch container | Installs the compositor and its patched Xwayland package. |
 | `install-anland-desktop.sh` | RootFS build environment | Dispatches a desktop slug to KDE, GNOME, Niri, Hyprland, Mango, Denial, or Anland Next. |
-| `lib/anland-build.sh` | RootFS build host | Resolves the Anland package family, Release tag, and revision for native/QEMU builds. |
+| `lib/anland-build.sh`, `lib/desktop-config.sh`, `lib/rootfs-config.sh` | RootFS build host | Resolve the Anland package family, desktop configuration, and RootFS configuration for native/QEMU builds; these are shared build libraries. |
+| `armada/*` | ArmadaOS build environment or Linux container | ArmadaOS-specific session/Steam wrappers, Decky/splash configuration, build-time patches, and Anland verification tools. |
 | `install-usb-manager.sh` | Linux container | Installs Droidspaces USB Manager, distribution dependencies, launchers, and user permissions. |
 | `systemd257.sh` | RootFS build environment | Installs a complete package-manager-owned systemd 257 family when required by an old Android kernel. |
 | `download-firmware` | Debian/Ubuntu container | Installs `linux-firmware` and decompresses its `.zst` firmware. |
@@ -63,7 +64,7 @@ droidspaces-tui --source github
 
 ## Mesa Installer
 
-`install-mesa.sh` selects the ARM64 Mesa asset for the current distribution from the distribution Release in GitHub/proxy mode; CNB mode reads only `mesa-distribution-manifest` from the matching CNB Release. It then installs the synchronized `msm_drm_drv_video.so`. It supports Debian 13, Ubuntu 24.04/25.10/26.04, Fedora 43/44, and Arch Linux. The media decode driver is installed in each distribution's default libva driver directory: `/usr/lib/aarch64-linux-gnu/dri` on Debian/Ubuntu, `/usr/lib64/dri` on Fedora, and `/usr/lib/dri` on Arch Linux.
+`install-mesa.sh` selects the ARM64 Mesa asset for the current distribution from the distribution Release in GitHub/proxy mode; CNB mode reads only `mesa-distribution-manifest` from the matching CNB Release. It then installs the synchronized `msm_drm_drv_video.so`. It supports Debian 13, Ubuntu 24.04/25.10/26.04, Fedora 43/44, ArmadaOS, and Arch Linux. ArmadaOS uses the Fedora archive matching its `VERSION_ID`, so Fedora 44-based ArmadaOS uses the same Mesa archive and media driver directory as Fedora 44 containers. The media decode driver is installed in each distribution's default libva driver directory: `/usr/lib/aarch64-linux-gnu/dri` on Debian/Ubuntu, `/usr/lib64/dri` on Fedora, and `/usr/lib/dri` on Arch Linux.
 
 The installer strictly validates Release tags, asset names, and downloaded content. GitHub/proxy mode retains GitHub Release API SHA-256 cross-checks; CNB mode uses only the SHA-256 values and sizes in the CNB distribution manifest, then still verifies the synchronized media-driver `SHA256SUMS`. Downloads can resume, and temporary files are removed on exit.
 
