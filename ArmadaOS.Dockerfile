@@ -1675,14 +1675,24 @@ RUN set -eux; \
 # The patch lives in this repo; the script applies it on top of the armada
 # recipe's own patch set so the result stays a normal armada package.
 # The recipe comes from the armada tree, so it is cloned here rather than
-# vendored. Build-only packages are removed again in the same layer.
+# vendored. It is pinned to ARMADA_COMMIT for the same reason gamescope is: the
+# mangohud spec and its 9 patches move with upstream, and an unpinned clone
+# would silently build a different package (or fail) whenever armada changes
+# them. Build-only packages are removed again in the same layer.
+#
+# ARMADA_COMMIT is (re)declared here because a Dockerfile ARG only applies from
+# its declaration line downwards; the single definition lives at the "9." pin
+# block below, which is too late for this step. Keep both values identical.
+ARG ARMADA_COMMIT=d5c23cd7831a765942559a0351859a7577afc18b
 COPY scripts/armada/mangohud-container-metrics.patch /tmp/mangohud-container-metrics.patch
 COPY scripts/armada/build-mangohud-container.sh /usr/local/sbin/build-mangohud-container
 COPY scripts/armada/mangohud-energy-model.service /usr/lib/systemd/system/mangohud-energy-model.service
 RUN set -eux; \
     chmod 0755 /usr/local/sbin/build-mangohud-container; \
     dnf -y install --setopt=install_weak_deps=False git; \
-    git clone --depth 1 https://github.com/armada-os/armada.git /tmp/armada; \
+    git clone --quiet --filter=blob:none --no-checkout \
+        https://github.com/armada-os/armada.git /tmp/armada; \
+    git -C /tmp/armada checkout --quiet "$ARMADA_COMMIT"; \
     ARMADA_ROOT=/tmp/armada \
     CACHE=/var/tmp/mangohud-build \
     PATCH=/tmp/mangohud-container-metrics.patch \
@@ -1708,19 +1718,27 @@ RUN set -eux; \
 #   xwayland SDK      xwayland.pc, generated below              -> deleted
 #
 # Pin rationale: gamescope.patch and the anland overlay are written against
-# gamescope 3.17.0-ogc1 and the Armada patch series as of f0a50c0a. build.sh
-# asserts exactly 32 Armada patches, so armada must never be taken from HEAD.
+# gamescope 3.17.0-ogc1 and the Armada patch series at ARMADA_COMMIT. build.sh
+# asserts the exact Armada patch count, so armada must never be taken from HEAD:
+# the count moves whenever upstream adds or drops a patch (0027 was dropped in
+# 4d6ea8b, taking the series 32 -> 31). When bumping ARMADA_COMMIT, update the
+# count assertion below and the one in anland's build.sh together.
 
 ARG ANLAND_REPOSITORY=https://github.com/sjszero/anland.git
 ARG ANLAND_BRANCH=legacy
-ARG ARMADA_REPOSITORY=https://github.com/armada-os/armada.git
-ARG ARMADA_COMMIT=f0a50c0a178d71c0ea3d1a67e385dce0ef6c2158
 ARG TERRA_REPOSITORY=https://github.com/terrapkg/packages.git
 ARG TERRA_COMMIT=23ec8c9aeaad28179925232fe7564f80da06d4ab
 ARG GAMESCOPE_REPOSITORY=https://github.com/OpenGamingCollective/gamescope
 ARG GAMESCOPE_TAG=3.17.0-ogc1
 ARG GAMESCOPE_COMMIT=4246b87f49d6116d5f863131dcc401fc52840644
 ARG ANLAND_JOBS=4
+
+# Armada pins used by the gamescope build below (and, for ARMADA_COMMIT, by the
+# MangoHud step above, which re-declares the same value because ARGs only apply
+# from their declaration line downwards). Keep the two ARMADA_COMMIT values and
+# the patch-count assertion below in sync with anland's build.sh.
+ARG ARMADA_REPOSITORY=https://github.com/armada-os/armada.git
+ARG ARMADA_COMMIT=d5c23cd7831a765942559a0351859a7577afc18b
 
 # Drop privileges without opening a PAM session.
 # runuser opens one, and pam_limits then fails with
@@ -1804,7 +1822,7 @@ git clone --quiet --filter=blob:none --no-checkout \
 git -C "$BUILD_ROOT/armada" checkout --quiet "$ARMADA_COMMIT"
 ARMADA_ROOT="$BUILD_ROOT/armada"
 test "$(find "$ARMADA_ROOT/packages/gamescope/patches" \
-    -name '[0-9][0-9][0-9][0-9]-*.patch' | wc -l)" = 32
+    -name '[0-9][0-9][0-9][0-9]-*.patch' | wc -l)" = 31
 
 # Terra/OGC RPM recipe at the pinned commit (build.sh adapts it in place).
 git clone --quiet --filter=blob:none --no-checkout \
@@ -1920,7 +1938,7 @@ set -euo pipefail
 ANLAND=/usr/local/src/anland
 BUILD_ROOT=/var/tmp/anland-gamescope-build
 CACHE="$BUILD_ROOT/cache"
-ARMADA_COMMIT=f0a50c0a178d71c0ea3d1a67e385dce0ef6c2158
+ARMADA_COMMIT=d5c23cd7831a765942559a0351859a7577afc18b
 TERRA_COMMIT=23ec8c9aeaad28179925232fe7564f80da06d4ab
 GAMESCOPE_TAG=${GAMESCOPE_TAG:-3.17.0-ogc1}
 JOBS=${JOBS:-$(nproc)}
