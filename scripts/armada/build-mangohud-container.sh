@@ -26,17 +26,19 @@
 # Two host quirks this script works around, both documented so they are not
 # rediscovered the hard way:
 #
-#  1. glfw-devel cannot be installed. It requires pkgconfig(dri), which comes
-#     from mesa-libGL-devel, and this image excludes `mesa*` in /etc/dnf/dnf.conf
-#     to keep the pinned Mesa/Turnip stack. Bypassing the exclude with
-#     `--setopt=exclude=` upgrades Mesa and breaks KGSL, so instead the package
-#     is downloaded and only the headers, glfw3.pc and the .so symlink are
-#     extracted. Nothing from mesa is touched.
+#  1. glfw-devel needs pkgconfig(dri), which comes from mesa-libGL-devel. Once
+#     install-mesa has run it pins `exclude=mesa*` in /etc/dnf/dnf.conf to keep
+#     the container's KGSL/Turnip stack, so installing glfw-devel there would
+#     upgrade Mesa and break KGSL. This script runs *before* that point in the
+#     image build, where mesa is still unlocked, so it installs glfw-devel
+#     normally. If it ever runs on a host that already excludes mesa*, it falls
+#     back to downloading glfw-devel and extracting only the headers, glfw3.pc
+#     and the .so symlink, leaving mesa untouched.
 #
 #  2. rpmbuild's BuildRequires check cannot be satisfied for pkgconfig(dri) and
-#     pkgconfig(glfw3): dri.pc exists on disk but no RPM owns it after (1).
-#     `--nodeps` skips that gate only; the real compilation still links against
-#     the extracted glfw.
+#     pkgconfig(glfw3) in the fallback path: dri.pc exists on disk but no RPM
+#     owns it. `--nodeps` skips that gate only; the real compilation still links
+#     against glfw.
 #
 # Usage:
 #   build-mangohud-container.sh [--version X.Y.Z] [--jobs N] [--keep]
@@ -120,9 +122,18 @@ need_root() {
     [[ $(id -u) == 0 ]] || die "this step needs root; re-run with sudo or install the deps manually"
 }
 
+# True when /etc/dnf/dnf.conf (or any repo file) excludes mesa*, which is what
+# install-mesa sets up after it puts the container-specific drivers in place.
+mesa_is_locked() {
+    local conf
+    for conf in /etc/dnf/dnf.conf /etc/dnf/dnf.conf.d/*.conf; do
+        [[ -f $conf ]] || continue
+        grep -qE '^[[:space:]]*(exclude|excludepkgs)[[:space:]]*=.*mesa\*' "$conf" && return 0
+    done
+    return 1
+}
+
 prepare_glfw() {
-    # See header note 1. Only headers, the .pc file and the linker symlink are
-    # taken; mesa is never upgraded.
     if pkg-config --exists glfw3 2>/dev/null &&
        [[ -e /usr/lib64/libglfw.so ]] &&
        [[ -e /usr/include/GLFW/glfw3.h ]]; then
@@ -130,6 +141,21 @@ prepare_glfw() {
         return 0
     fi
 
+    # MangoHud is built before install-mesa locks the drivers, so on a stock
+    # armada image mesa is not excluded yet and glfw-devel can simply be
+    # installed. That is the normal path and it keeps the build simple.
+    if ! mesa_is_locked; then
+        need_root
+        if dnf install -y --setopt=install_weak_deps=False glfw-devel >/dev/null 2>&1 &&
+           pkg-config --exists glfw3 2>/dev/null; then
+            log "installed glfw-devel"
+            return 0
+        fi
+        log "glfw-devel install failed; falling back to extracting it"
+    fi
+
+    # See header note 1. Only headers, the .pc file and the linker symlink are
+    # taken; mesa is never upgraded.
     local dl=$CACHE/glfw-devel
     mkdir -p "$dl"
     if ! ls "$dl"/*.rpm >/dev/null 2>&1; then
@@ -160,10 +186,14 @@ prepare_glfw() {
 
 prepare_deps() {
     local missing=()
-    for tool in rpmbuild git meson ninja gcc g++ pkg-config python3 glslangValidator rpm2cpio cpio; do
+    for tool in rpmbuild git meson ninja gcc g++ pkg-config python3 glslangValidator rpm2cpio cpio cmake; do
         command -v "$tool" >/dev/null || missing+=("tool:$tool")
     done
-    for pc in vulkan appstream dbus-1 yaml-cpp nlohmann_json spdlog glslang; do
+    # gl belongs here: -Dmangoapp=true switches imgui's opengl feature on, so
+    # imgui's meson.build asks for dependency('gl') and needs gl.pc plus
+    # /usr/include/GL/gl.h. Both come from libglvnd-devel.
+    for pc in vulkan appstream dbus-1 yaml-cpp nlohmann_json spdlog glslang \
+              wayland-client x11 xkbcommon gl; do
         pkg-config --exists "$pc" 2>/dev/null || missing+=("pkgconfig:$pc")
     done
     if ! find "$(gcc -print-file-name=libstdc++.a 2>/dev/null)" -maxdepth 0 -type f >/dev/null 2>&1; then
@@ -176,11 +206,12 @@ prepare_deps() {
         dnf install -y --skip-broken \
             rpm-build rpmdevtools 'dnf5-command(builddep)' git meson ninja-build \
             gcc gcc-c++ pkgconf-pkg-config python3 glslang \
-            vulkan-headers appstream dbus-devel yaml-cpp-devel json-devel \
+            vulkan-headers appstream appstream-devel dbus-devel yaml-cpp-devel json-devel \
             spdlog-devel glslang-devel libstdc++-static \
             libdrm-devel wayland-devel wayland-protocols-devel python3-mako \
             libX11-devel libXrandr-devel libXcursor-devel libcurl-devel \
-            vulkan-loader-devel libappstream-glib >/dev/null 2>&1 ||
+            libxkbcommon-devel libxkbcommon-x11-devel \
+            vulkan-loader-devel libappstream-glib libglvnd-devel >/dev/null 2>&1 ||
             die "dependency installation failed"
     fi
 
@@ -206,28 +237,73 @@ else
     log "using cached tarball $TARBALL"
 fi
 
-# The meson subprojects are fetched at build time and GitHub is flaky from a
-# container, so keep them cached and seed meson's packagecache before building.
-declare -A SUBPROJECTS=(
-    [imgui-1.91.6.tar.gz]=https://github.com/ocornut/imgui/archive/refs/tags/v1.91.6.tar.gz
-    [implot-0.16.zip]=https://github.com/epezent/implot/archive/refs/tags/v0.16.zip
-    [spdlog-1.14.1.tar.gz]=https://github.com/gabime/spdlog/archive/refs/tags/v1.14.1.tar.gz
-    [vulkan-headers-1.4.346.tar.gz]=https://github.com/KhronosGroup/Vulkan-Headers/archive/v1.4.346.tar.gz
-    [vulkan-utility-libraries-1.4.346.tar.gz]=https://github.com/KhronosGroup/Vulkan-Utility-Libraries/archive/v1.4.346.tar.gz
-)
+# The spec sets %global __meson_wrap_mode default, so meson fetches the five
+# wrap subprojects itself during %build. Do that download here instead: a fresh
+# container has no warm cache, and a failure inside meson names no URL. Every
+# file is also hash-checked against the wrap file, so a truncated download stops
+# the build now instead of as "Incorrect hash for source" minutes later.
+#
+# The files are then handed to meson through MESON_PACKAGE_CACHE_DIR. That is
+# the variable meson 1.x actually reads
+# (mesonbuild/wrap/wrap.py: os.environ.get('MESON_PACKAGE_CACHE_DIR')), and it
+# is exported into rpmbuild below. Without it meson only looks at
+# <src>/subprojects/packagecache, which %autosetup recreates empty from the
+# tarball, and there is no per-user global cache to fall back on.
 SUBDIR=$CACHE/subprojects
 mkdir -p "$SUBDIR"
-for name in "${!SUBPROJECTS[@]}"; do
-    dest=$SUBDIR/$name
-    [[ -s $dest ]] && continue
-    log "downloading subproject $name"
-    ok=0
-    for attempt in 1 2 3 4 5; do
-        if timeout 200 curl -sSL -o "$dest" "${SUBPROJECTS[$name]}" && [[ -s $dest ]]; then ok=1; break; fi
-        sleep $(( attempt * 3 ))
+
+fetch() {   # fetch <filename> <expected-sha256> <url> [fallback-url...]
+    local name=$1 hash=$2
+    shift 2
+    local dest=$SUBDIR/$name
+    if [[ -s $dest ]] && printf '%s  %s\n' "$hash" "$dest" | sha256sum -c --status -; then
+        log "subproject $name already downloaded"
+        return 0
+    fi
+    rm -f "$dest"
+    local url attempt
+    for url in "$@"; do
+        for attempt in 1 2 3; do
+            log "downloading $name (attempt $attempt)"
+            if timeout 300 curl -fsSL -o "$dest.part" "$url"; then
+                if printf '%s  %s\n' "$hash" "$dest.part" | sha256sum -c --status -; then
+                    mv -f "$dest.part" "$dest"
+                    return 0
+                fi
+                log "checksum mismatch for $name from $url, retrying"
+            fi
+            sleep $(( attempt * 3 ))
+        done
     done
-    (( ok )) || { rm -f "$dest"; die "cannot download subproject $name"; }
-done
+    rm -f "$dest" "$dest.part"
+    die "cannot download subproject $name (tried: $*)"
+}
+
+# source and patch files both live in the packagecache; hashes are copied from
+# MangoHud 0.8.4's subprojects/*.wrap.
+fetch imgui-1.91.6.tar.gz \
+    c5fbc5dcab1d46064001c3b84d7a88812985cde7e0e9ced03f5677bec1ba502a \
+    https://github.com/ocornut/imgui/archive/refs/tags/v1.91.6.tar.gz
+fetch implot-0.16.zip \
+    24f772c688f6b8a6e19d7efc10e4923a04a915f13d487b08b83553aa62ae1708 \
+    https://github.com/epezent/implot/archive/refs/tags/v0.16.zip \
+    https://github.com/mesonbuild/wrapdb/releases/download/implot_0.16-1/implot-0.16.zip
+fetch implot_0.16-1_patch.zip \
+    1c6b1462066a5452fa50c1da1dd47fed841f28232972c82d778f2962936568c7 \
+    https://wrapdb.mesonbuild.com/v2/implot_0.16-1/get_patch
+fetch spdlog-1.14.1.tar.gz \
+    1586508029a7d0670dfcb2d97575dcdc242d3868a259742b69f100801ab4e16b \
+    https://github.com/gabime/spdlog/archive/refs/tags/v1.14.1.tar.gz \
+    https://github.com/mesonbuild/wrapdb/releases/download/spdlog_1.14.1-1/spdlog-1.14.1.tar.gz
+fetch spdlog_1.14.1-1_patch.zip \
+    ae878e732330ea1048f90d7e117c40c0cd2a6fb8ae5492c7955818ce3aaade6c \
+    https://wrapdb.mesonbuild.com/v2/spdlog_1.14.1-1/get_patch
+fetch vulkan-headers-1.4.346.tar.gz \
+    5bb77f5d7b460e255a9e51affc00d64354986b55cf577d8eab28529cad01fc80 \
+    https://github.com/KhronosGroup/Vulkan-Headers/archive/v1.4.346.tar.gz
+fetch vulkan-utility-libraries-1.4.346.tar.gz \
+    372eb525103ecb4e3a04d030b2a9778ebc67853bbdc82ce6747de3757d432ad9 \
+    https://github.com/KhronosGroup/Vulkan-Utility-Libraries/archive/v1.4.346.tar.gz
 
 # ---- assemble the build tree ----------------------------------------------
 TOP=$CACHE/rpmbuild
@@ -268,11 +344,16 @@ tar xf "$TARBALL" -C "$VERIFY"
   patch -p1 --batch --forward --fuzz=0 <"$PATCH" >/dev/null || exit 1
 ) || die "patch series does not apply cleanly (armada patches or container patch drifted)"
 
-# Seed meson's packagecache from the verified tree so the build never needs the
-# network. The directory only exists after the first configure, so create it.
-PKGCACHE=$VERIFY/MangoHud-$VERSION/subprojects/packagecache
-mkdir -p "$PKGCACHE"
-cp "$SUBDIR"/* "$PKGCACHE"/
+# Hand the downloads to meson. meson only looks at $MESON_PACKAGE_CACHE_DIR or
+# <src>/subprojects/packagecache; it has no per-user global cache, and
+# %autosetup unpacks the tarball fresh into %{_builddir} with an empty
+# packagecache, so the only way in is the environment variable. Verified against
+# mesonbuild/wrap/wrap.py in meson 1.11.2:
+#     os.environ.get('MESON_PACKAGE_CACHE_DIR') or <src>/subprojects/packagecache
+# rpmbuild passes the environment through to %build (checked with a scratch
+# spec), so export it for the rpmbuild invocation below.
+export MESON_PACKAGE_CACHE_DIR=$SUBDIR
+PKGCACHE=$MESON_PACKAGE_CACHE_DIR
 rm -rf "$VERIFY"
 
 # ---- build -----------------------------------------------------------------
