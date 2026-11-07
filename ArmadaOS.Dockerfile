@@ -1655,30 +1655,43 @@ for unit in gamescope-session-plus@steam.service armada-steam-desktop.service; d
         > "/etc/systemd/user/${unit}.d/60-armada-steam-runtime.conf"
 done
 EOF_RUN
-# 8c. MangoHud from the Fedora repository.
-# The armada base image ships mangohud-0.8.4-1.fc44.armada, which carries nine
-# patches aimed at bare-metal Qualcomm hardware: msm_dpu/msm_drm fdinfo
-# identification, GPU monitoring, the SM8750 battery and RAM names. Inside a
-# container those paths do not describe the real device, so the patched
-# readings are not meaningful and the overlay can report values the host never
-# exposed. Take the Fedora build instead, pinned by version so a later base
-# image bump cannot silently reintroduce the armada package.
-# The downgrade is explicit because `dnf install mangohud` treats the installed
-# armada build as satisfying the request and would leave it in place.
-ARG MANGOHUD_NEVRA=mangohud-0.8.3~rc1-2.fc44.aarch64
+# 8c. Seed the container's game-tweaks environment overrides.
+# /usr/share/armada/game-tweaks.json (factory defaults) has no "env" block, so
+# Armada's tweak wrapper never pins the Mesa loader. Inside Droidspaces the
+# render node arrives through the Android display stack, so KGSL has to be
+# selected explicitly or Mesa probes for a DRM device that is not present.
+# This writes only the /etc override layer and never touches the factory file.
+COPY scripts/armada/configure-armada-game-tweaks-env.py /usr/local/sbin/configure-armada-game-tweaks-env
 RUN set -eux; \
-    current=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}' mangohud 2>/dev/null || echo none); \
-    if [ "$current" != "$MANGOHUD_NEVRA" ]; then \
-        if [ "$current" = none ]; then \
-            dnf -y install --setopt=install_weak_deps=False "$MANGOHUD_NEVRA"; \
-        else \
-            dnf -y downgrade "$MANGOHUD_NEVRA"; \
-        fi; \
-    fi; \
-    test "$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}' mangohud)" = "$MANGOHUD_NEVRA"; \
-    rpm -q --qf 'mangohud %{VERSION}-%{RELEASE} vendor=%{VENDOR}\n' mangohud; \
+    chmod 0755 /usr/local/sbin/configure-armada-game-tweaks-env; \
+    /usr/local/sbin/configure-armada-game-tweaks-env; \
+    python3 -c 'import json,sys; d=json.load(open("/etc/armada/game-tweaks.json")); sys.exit(0 if d["global"]["env"]["MESA_LOADER_DRIVER_OVERRIDE"] == "kgsl" else 1)'
+# 8d. MangoHud rebuilt with the container metric patch.
+# The armada package reads sysfs paths a Droidspaces container does not mount:
+# it wants devfreq `cur_freq` (Hz) for the GPU clock, but the container exposes
+# the older kgsl-3d0 layout where the clock is `clock_mhz` (MHz), and
+# /sys/class/hwmon does not exist at all. Without the patch the overlay shows
+# GPU clock/load/temperature as 0.
+# The patch lives in this repo; the script applies it on top of the armada
+# recipe's own patch set so the result stays a normal armada package.
+# The recipe comes from the armada tree, so it is cloned here rather than
+# vendored. Build-only packages are removed again in the same layer.
+COPY scripts/armada/mangohud-container-metrics.patch /tmp/mangohud-container-metrics.patch
+COPY scripts/armada/build-mangohud-container.sh /usr/local/sbin/build-mangohud-container
+COPY scripts/armada/mangohud-energy-model.service /usr/lib/systemd/system/mangohud-energy-model.service
+RUN set -eux; \
+    chmod 0755 /usr/local/sbin/build-mangohud-container; \
+    dnf -y install --setopt=install_weak_deps=False git; \
+    git clone --depth 1 https://github.com/armada-os/armada.git /tmp/armada; \
+    ARMADA_ROOT=/tmp/armada \
+    CACHE=/var/tmp/mangohud-build \
+    PATCH=/tmp/mangohud-container-metrics.patch \
+        /usr/local/sbin/build-mangohud-container --jobs "$(nproc)" --install; \
+    rpm -q mangohud; \
+    test -f /usr/bin/mangoapp; \
+    systemctl enable mangohud-energy-model.service; \
+    rm -rf /tmp/armada /var/tmp/mangohud-build /tmp/mangohud-container-metrics.patch; \
     dnf clean all
-
 # --- 9. Anland gamescope (built from source, then discarded) ----------------
 # ArmadaOS ships terra-gamescope, but the Anland display backend lives in the
 # anland project and must be compiled against this exact gamescope revision.

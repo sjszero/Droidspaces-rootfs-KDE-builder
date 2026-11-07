@@ -390,6 +390,97 @@ exclude=xdg-desktop-portal*,mesa*,systemd*
 四阶段 rc 均为 0；`excludepkgs_rc=0`、`exclude_rc=0`；配置中字面 `\n` 计数为 0。
 
 补充校验：两段 RUN 块拼回后 `sh -n` 均通过；同一块连续执行两次结果不变（幂等）；已存在 `excludepkgs`、已存在 `exclude`、两者都已含 portal 三种初始状态下断言均通过；全仓库 8 个 Dockerfile 与 `*.sh`/`*.py` 扫描无残留双重转义；`git diff --check` 通过。
-
 ### 仍未验证
 未重建镜像（本容器 rootless Podman 因 `newuidmap` 无 setuid/filecaps 无法启动，rootful 存储亦不可用），因此 `#120` 之后剩余 2 层与最终导出 RootFS 未实测。上述验证是等价的 shell 级复现，不是容器内真跑。未提交或推送 Git。
+
+## 2026-11-07 game-tweaks 环境默认值
+新增脚本 `scripts/armada/configure-armada-game-tweaks-env.py`，接入 `ArmadaOS.Dockerfile` 的 `8c` 段。
+Armada 读取两份配置：`/usr/share/armada/game-tweaks.json` 是工厂默认值（**没有 `env` 块**），`/etc/armada/game-tweaks.json` 是覆盖层，`armada_game_tweaks.py` 用 `data["global"].update(overrides)` 做浅合并。脚本只往覆盖层写入 `global.env.MESA_LOADER_DRIVER_OVERRIDE=kgsl`，不动工厂文件。
+行为约束：
+- 已有覆盖文件保留全部既有键，包括手工添加的 `env` 条目；
+- 该键已存在但值不同（例如用户选了 `zink`）时**保留用户值并打印提示**，不覆盖；
+- JSON 损坏时以非零退出，绝不静默重写；
+- `ARMADA_GAME_TWEAKS_OVERRIDES` 可指向暂存副本，供镜像构建与测试使用。
+实测 5 个场景全部通过：新建、幂等重跑、保留其它键、保留用户自定义值、损坏文件拒绝覆盖。
+### MangoHud 不再干预
+镜像不再对 MangoHud 做任何处理：既不降级发行版包，也不从源码构建，完全沿用基镜像自带的版本。原先的 `8c` 降级段（把 armada 的 `0.8.4-1.fc44.armada` 降为 `0.8.3~rc1-2.fc44`）已删除。
+历史上试过两种替代方案，均已放弃，记录原因避免重复踩坑：
+- **上游源码构建**：`mangoapp` 与 `glfw` 存在硬冲突——上游 `meson.build` 在 `mangoapp=true` 时追加 `imgui_options += ['glfw=enabled']`，而 `glfw-devel` 依赖 `pkgconfig(dri)`（来自 `mesa-libGL-devel`），本镜像 `dnf.conf` 有 `exclude=...mesa*`。**不要用 `--setopt=exclude=` 绕过该排除**：实测会把 Mesa 从 26.2.5 升级到 26.2.6 并删除多个 mesa 子包，破坏 KGSL/Turnip 栈。回滚需同样绕过 exclude 执行 `dnf history undo`。源码构建还需额外安装 `yaml-cpp-devel`、`libstdc++-static`，并显式关闭默认 `enabled` 的 `with_xnvctrl`/`with_nvml`。
+- **降级发行版包**：armada 的 MangoHud 针对裸机 Qualcomm 硬件打了九个补丁（msm_dpu/msm_drm fdinfo 识别、GPU 监控、SM8750 电池与内存名称），容器内这些读数并不描述真实设备；但这不构成降级理由，按需在容器内单独处理即可。
+### 仍未验证
+未重建镜像；本次验证是在当前容器内直接执行脚本，等价于 Dockerfile 中对应 RUN 块的命令序列，但不是完整镜像构建。
+
+## 2026-11-07 MangoHud 容器指标补丁
+容器里的 MangoHud 指标全为 0，实测日志给出三处失效：
+```text
+[warning] kgsl: /sys/class/kgsl/kgsl-3d0/cur_freq is not found
+[debug]   hwmon: failed to find hwmon directory
+[error]   Error opening directory '/sys/class/hwmon/'
+[debug]   load = 0, proc_vram = 0, power = 0, core = 0, temp = 0
+```
+根因是 armada 补丁集只读 devfreq `cur_freq`（Hz），而容器内核暴露的是老式 `kgsl-3d0` 布局，频率在 `clock_mhz`（MHz），`cur_freq` 不存在；同时 `/sys/class/hwmon` 整个未挂载。
+### 补丁：`scripts/armada/mangohud-container-metrics.patch`
+| 位置 | 改动 |
+| --- | --- |
+| `init_kgsl()` | 探测 `clock_mhz`/`cur_freq`/`gpu_busy_percentage`/`temp`，存在哪个开哪个，不再假设单一布局 |
+| `get_kgsl_clock()` | 新增 `gpu_clock_stream_unit_mhz` 标志，按单位换算（MHz 直出 / Hz 除 1e6） |
+| 新增 thermal 兜底 | `init_thermal_zone_fallback()` + `get_thermal_zone_temp()`，KGSL/hwmon 都拿不到时读 `gpuss-N` thermal zone |
+| `file_utils.cpp ls()` | 目录不存在是 `ENOENT` 而非错误，降到 debug，避免每次扫描刷 journal |
+实测修复前后：`load 0→28`、`core 0→366`、`temp 0→47`。
+仍然为 0 的是 `power`/`proc_vram`/`fan`/`voltage`：msm 驱动只通过 hwmon 暴露这些，容器无 hwmon 即无数据源；统一内存架构也没有独立 VRAM。这些不做假值填充。
+### CPU 功耗：走内核 EAS energy model
+`cpu_power` 原先恒为 0，因为 MangoHud 只会从 `hwmon`（k10temp/zenpower/zenergy/apm_xgene）、`powercap`（RAPL）或 AMD APU 取功耗，这台设备三者都没有。实测确认：
+
+| 检查项 | 结果 |
+| --- | --- |
+| `/sys/class/hwmon` | 整机不存在（`CONFIG_HWMON` 未启用） |
+| `/sys/class/powercap` | 目录存在但**零条目**（`CONFIG_POWERCAP=y` 但无驱动注册） |
+| `walt` / `qcom_llcc` 等能量计数器 | 均不存在 |
+
+但内核发布了厂商标定的 EAS 功耗表，补丁据此新增数据源：
+
+| 数据源 | 路径 | 内容 |
+| --- | --- | --- |
+| 静态功耗表 | `/sys/kernel/debug/energy_model/<域>/ps:<freq>/power` | 每个 OPP 的功耗 |
+| 频率驻留计数 | `/sys/devices/system/cpu/cpuN/cpufreq/stats/time_in_state` | 各 OPP 累计驻留时间 |
+
+`get_cpu_power_energy_model()` 对驻留增量做功耗加权平均，再按域求和——与 Android Power HAL 同一套模型。注册为 `CPU_POWER_ENERGY_MODEL`，排在 hwmon / APU / powercap 全部失败之后，裸机行为不变。
+
+**单位坑（务必注意）**：debugfs 的 `power` 属性由内核 `em_debug_power_show()` 输出为 `ps->power * 1000`，即 **µW**；而内核内部 `em_perf_state.power` 字段是 mW。第一版按 mW 换算算出 243 W（整机仅 0.6 W），已改为 `/1000000`。变量名同步用 `uw` 以免再误读。
+
+实测（本机 4 簇）：
+
+| 域 | CPU | OPP 数 | 当前功耗 |
+| --- | --- | --- | --- |
+| cpu0 | 0-1 | 18 | 0.017 W |
+| cpu2 | 2-4 | 32 | 0.052 W |
+| cpu5 | 5-6 | 29 | 0.048 W |
+| cpu7 | 7 | 37 | 0.129 W |
+| 合计 | | | **0.246 W** |
+
+同期整机电池 `power_now` 为 0.606 W，CPU 占 41%，量级合理。
+
+GPU 功耗**无法获取**：`energy_model` 只含 cpu0/2/5/7，GPU OPP 的 `u_watt`/`u_volt_target`/`u_amp` 全为 0（厂商未填充），kgsl debugfs 无任何功耗节点。要真实读数只能改内核让 kgsl 注册 hwmon/powercap，超出容器范围。
+
+### 开机自动放行：`scripts/armada/mangohud-energy-model.service`
+`energy_model` 在 debugfs 下，挂载点权限是 `drwx------ root:root`，普通用户读不到。装成 systemd oneshot：
+
+- `ExecStart`：debugfs 未挂载则先挂，再把挂载点 `chmod 0755`（只放开目录，内部文件仍由内核控制）
+- `ExecStartPost`：`test -r /sys/kernel/debug/energy_model`，失败则单元可见地报错，避免 `cpu_power` 静默消失
+- `WantedBy=multi-user.target`，镜像构建时 `systemctl enable`
+
+冷启动场景已实测：手动 `chmod 700` 模拟重启后权限状态 → 用户读不到 → `systemctl restart` → 恢复可读 → MangoHud 重新识别出 4 个域。
+### 构建脚本：`scripts/armada/build-mangohud-container.sh`
+从 `~/armada/packages/mangohud` 取 spec、`BASE.env` 与 9 个补丁，叠加本仓库补丁后产出 RPM。`Version` 与 `ARMADA_MARCH` 都从 armada 配方读取，不硬编码。
+```bash
+scripts/armada/build-mangohud-container.sh              # 只构建
+scripts/armada/build-mangohud-container.sh --install    # 构建并安装
+scripts/armada/build-mangohud-container.sh --dry-run    # 只打印解析结果
+```
+接入 `ArmadaOS.Dockerfile` 的 `8d` 段：克隆 armada 树 → 构建 → 安装 → 清理。
+脚本处理了两个宿主限制：
+1. **glfw-devel 装不上**（`pkgconfig(dri)` ← `mesa-libGL-devel`，被 `exclude=...mesa*` 挡住）。改为 `dnf download` 后只提取头文件、`glfw3.pc` 和 `libglfw.so` 符号链接，不碰 mesa。
+2. **BuildRequires 无法满足** `pkgconfig(dri)`/`pkgconfig(glfw3)`。用 `--nodeps` 只跳过这道门禁，实际编译仍链接已提取的 glfw。
+构建前会先用 `--fuzz=0` 验证整条补丁链可干净应用，漂移即硬失败，不会静默偏移。
+### 仍未验证
+脚本已在容器内端到端实跑（含 `--install`，产出 1.9M RPM 并生效）；未重建完整镜像。

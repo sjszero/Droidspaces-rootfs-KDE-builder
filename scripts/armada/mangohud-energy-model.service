@@ -1,0 +1,36 @@
+[Unit]
+Description=Expose kernel energy model for CPU power telemetry
+Documentation=file:/usr/share/doc/armada/mangohud-container-metrics.md
+# Nothing in the boot sequence needs this, but MangoHud reads it as soon as a
+# game starts, so bring it up with the rest of the session infrastructure.
+After=local-fs.target
+Before=graphical.target
+ConditionPathIsDirectory=/sys/kernel/debug
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# debugfs is normally mounted by the host kernel before the container starts,
+# but the mountpoint is mode 0700 root:root. MangoHud runs as the session user
+# and only needs to read the energy model tables, so relax the directory to 0755
+# and leave every file inside it as the kernel created it.
+#
+# Mount first in case debugfs was not inherited: on a Droidspaces container the
+# sysfs/debugfs view comes from the host, and a missing debugfs would otherwise
+# make the chmod fail.
+ExecStart=/bin/sh -c '\
+    if ! grep -qw debugfs /proc/mounts; then \
+        /usr/bin/mount -t debugfs none /sys/kernel/debug || true; \
+    fi; \
+    /usr/bin/chmod 0755 /sys/kernel/debug'
+
+# Verify the result instead of assuming success: if the energy model is not
+# readable afterwards, the unit fails visibly rather than leaving a silently
+# broken cpu_power reading.
+ExecStartPost=/bin/sh -c '\
+    test -r /sys/kernel/debug/energy_model \
+        || { echo "energy_model is not readable; cpu_power will be unavailable" >&2; exit 1; }'
+
+[Install]
+WantedBy=multi-user.target

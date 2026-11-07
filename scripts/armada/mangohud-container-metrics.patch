@@ -1,0 +1,588 @@
+From: Droidspaces container adaptation
+Subject: [PATCH] Adapt MangoHud metrics to a Droidspaces container
+A Droidspaces container runs on real Qualcomm hardware but does not mount
+the whole sysfs tree, so several of the metrics the armada patch set reads
+are simply absent:
+  * /sys/class/hwmon does not exist, so the msm GPU hwmon node (power,
+    fan, vrm temp) is unreachable and the CPU sensor list is empty;
+  * the kernel exposes the older kgsl-3d0 layout, where the GPU clock is
+    `clock_mhz` (MHz) instead of devfreq `cur_freq` (Hz).
+The armada set reads only `cur_freq`, so inside a container the GPU clock,
+load and temperature all read 0 and the overlay is useless.
+Changes:
+  * init_kgsl(): probe clock_mhz, cur_freq, gpu_busy_percentage and temp,
+    opening whichever exist instead of assuming one layout.
+  * get_kgsl_clock(): scale per unit (MHz vs Hz) via a recorded flag.
+  * init_thermal_zone_fallback()/get_thermal_zone_temp(): when neither
+    KGSL nor hwmon yields a GPU temperature, read the gpuss-N thermal
+    zone the kernel still publishes.
+  * file_utils ls(): a missing directory is ENOENT, not an error; log at
+    debug so the overlay does not spam the journal every scan.
+  * CPU power via the kernel EAS energy model: this target exposes neither
+    hwmon nor a populated powercap, so cpu_power always read 0. The kernel
+    does publish a vendor-calibrated power table per CPU performance
+    domain in /sys/kernel/debug/energy_model, plus per-OPP residency in
+    cpufreq/stats/time_in_state. get_cpu_power_energy_model() combines
+    the two into a residency-weighted average, which is the same model the
+    Android power HAL uses. Registered as CPU_POWER_ENERGY_MODEL and tried
+    after hwmon, APU and powercap all fail, so bare-metal behaviour is
+    unchanged.
+Note: the energy model lives in debugfs, whose mountpoint is mode 0700.
+Reading it therefore needs either root or `chmod 755 /sys/kernel/debug`.
+Without that access the source simply fails to initialise and cpu_power
+stays hidden, exactly as before.
+
+diff --git a/src/cpu.cpp b/src/cpu.cpp
+index f46faba..58cefce 100644
+--- a/src/cpu.cpp
++++ b/src/cpu.cpp
+@@ -434,6 +434,117 @@ static bool get_cpu_power_rapl(CPUPowerData* cpuPowerData, float& power) {
+     return true;
+ }
+ 
++// Read the per-frequency residency counters of a cpufreq policy.
++// Returns false if the file is unreadable or empty.
++static bool read_time_in_state(const std::string& path,
++                               std::vector<std::pair<uint64_t, uint64_t>>& out) {
++    std::ifstream file(path);
++    if (file.fail())
++        return false;
++    out.clear();
++    std::string line;
++    while (std::getline(file, line)) {
++        if (line.empty())
++            continue;
++        std::istringstream iss(line);
++        uint64_t freq = 0;
++        uint64_t time = 0;
++        if (!(iss >> freq >> time))
++            continue;
++        out.emplace_back(freq, time);
++    }
++    return !out.empty();
++}
++
++// Residency-weighted CPU power estimate driven by the kernel EAS energy model.
++//
++// The kernel publishes a vendor-calibrated power table (mW) for every OPP of
++// each CPU performance domain. Combining that static table with the per-OPP
++// residency deltas gives the average power over the sampling window. This is
++// the same model the Android power HAL uses, and it needs no hardware energy
++// counter, which is why it works on devices that expose neither hwmon nor
++// powercap.
++static bool get_cpu_power_energy_model(CPUPowerData* cpuPowerData, float& power) {
++    CPUPowerData_energy_model* data = (CPUPowerData_energy_model*)cpuPowerData;
++    if (!data || data->domains.empty())
++        return false;
++
++    Clock::time_point now = Clock::now();
++    double total_power_uw = 0.0;
++    bool any_domain = false;
++
++    for (auto& domain : data->domains) {
++        std::vector<std::pair<uint64_t, uint64_t>> residency;
++        if (!read_time_in_state(domain.time_in_state_path, residency))
++            continue;
++
++        if (!domain.has_last) {
++            domain.last_residency = residency;
++            domain.lastSampleTime = now;
++            domain.has_last = true;
++            continue;
++        }
++
++        // Sum the residency deltas over the sampling window. Using deltas
++        // rather than the absolute counters keeps the estimate meaningful even
++        // though the counters accumulate since boot.
++        uint64_t total_delta = 0;
++        double weighted_power = 0.0;
++        for (size_t i = 0; i < residency.size() && i < domain.last_residency.size(); i++) {
++            uint64_t freq = residency[i].first;
++            uint64_t cur = residency[i].second;
++            uint64_t prev = domain.last_residency[i].second;
++            if (cur <= prev)
++                continue;
++            uint64_t delta = cur - prev;
++            total_delta += delta;
++
++            // Nearest OPP lookup: time_in_state and the energy model share the
++            // same frequency set on Qualcomm targets, but tolerate a mismatch
++            // instead of dropping the sample.
++            uint64_t uw = 0;
++            bool found = false;
++            for (const auto& entry : domain.table) {
++                if (entry.first == freq) {
++                    uw = entry.second;
++                    found = true;
++                    break;
++                }
++            }
++            if (!found) {
++                uint64_t best_diff = UINT64_MAX;
++                for (const auto& entry : domain.table) {
++                    uint64_t diff = entry.first > freq ? entry.first - freq : freq - entry.first;
++                    if (diff < best_diff) {
++                        best_diff = diff;
++                        uw = entry.second;
++                    }
++                }
++            }
++            weighted_power += (double)delta * (double)uw;
++        }
++
++        domain.last_residency = residency;
++        domain.lastSampleTime = now;
++
++        if (total_delta == 0)
++            continue;
++
++        any_domain = true;
++        total_power_uw += weighted_power / (double)total_delta;
++    }
++
++    if (!any_domain)
++        return false;
++
++    // The debugfs `power` attribute is printed by em_debug_power_show() as
++    // `ps->power * 1000`, i.e. microwatts, even though the in-kernel
++    // em_perf_state.power field is milliwatts. Summing microwatts and dividing
++    // by 1e6 therefore yields watts.
++    power = (float)(total_power_uw / 1000000.0);
++    return true;
++}
++
+ static bool get_cpu_power_amdgpu(float& power) {
+     if (gpus)
+         for (auto gpu : gpus->available_gpus)
+@@ -489,6 +600,9 @@ bool CPUStats::UpdateCpuPower() {
+         case CPU_POWER_XGENE:
+             if (!get_cpu_power_xgene(m_cpuPowerData.get(), power)) return false;
+             break;
++        case CPU_POWER_ENERGY_MODEL:
++            if (!get_cpu_power_energy_model(m_cpuPowerData.get(), power)) return false;
++            break;
+         default:
+             return false;
+     }
+@@ -717,6 +831,109 @@ static CPUPowerData_rapl* init_cpu_power_data_rapl(const std::string path) {
+     return powerData.release();
+ }
+ 
++// Parse a CPU list such as "0-1" or "2-4" and return the first CPU number.
++static int parse_first_cpu(const std::string& list) {
++    int first = -1;
++    size_t i = 0;
++    while (i < list.size()) {
++        while (i < list.size() && (list[i] == ',' || list[i] == ' '))
++            i++;
++        if (i >= list.size())
++            break;
++        int value = 0;
++        bool any = false;
++        while (i < list.size() && list[i] >= '0' && list[i] <= '9') {
++            value = value * 10 + (list[i] - '0');
++            i++;
++            any = true;
++        }
++        if (!any)
++            break;
++        if (first < 0)
++            first = value;
++        // Skip the remainder of a range such as "-3".
++        if (i < list.size() && list[i] == '-') {
++            i++;
++            while (i < list.size() && list[i] >= '0' && list[i] <= '9')
++                i++;
++        }
++        if (first >= 0)
++            break;
++    }
++    return first;
++}
++
++// Build the energy-model power source from the kernel EAS tables.
++// Returns nullptr when the kernel does not publish a usable energy model.
++static CPUPowerData_energy_model* init_cpu_power_data_energy_model() {
++    const std::string root = "/sys/kernel/debug/energy_model";
++    if (!dir_exists(root))
++        return nullptr;
++
++    auto powerData = std::make_unique<CPUPowerData_energy_model>();
++    auto domains = ls(root.c_str());
++    for (auto& domain : domains) {
++        std::string path = root + "/" + domain;
++        std::string cpus = read_line(path + "/cpus");
++        if (cpus.empty())
++            continue;
++        int first_cpu = parse_first_cpu(cpus);
++        if (first_cpu < 0)
++            continue;
++
++        std::string time_in_state =
++            "/sys/devices/system/cpu/cpu" + std::to_string(first_cpu) + "/cpufreq/stats/time_in_state";
++        if (!file_exists(time_in_state)) {
++            SPDLOG_DEBUG("energy_model: {} has no time_in_state, skipping", domain);
++            continue;
++        }
++
++        CPUPowerData_energy_model_domain entry;
++        entry.first_cpu = first_cpu;
++        entry.time_in_state_path = time_in_state;
++
++        auto ps_entries = ls(path.c_str(), "ps:", LS_DIRS);
++        for (auto& ps : ps_entries) {
++            std::string freq_str = read_line(path + "/" + ps + "/frequency");
++            std::string power_str = read_line(path + "/" + ps + "/power");
++            if (freq_str.empty() || power_str.empty())
++                continue;
++            uint64_t freq = 0;
++            uint64_t uw = 0;
++            try {
++                freq = std::stoull(freq_str);
++                uw = std::stoull(power_str);
++            } catch (const std::exception&) {
++                continue;
++            }
++            if (freq == 0)
++                continue;
++            entry.table.emplace_back(freq, uw);
++        }
++
++        if (entry.table.empty()) {
++            SPDLOG_DEBUG("energy_model: {} has no power table, skipping", domain);
++            continue;
++        }
++
++        std::sort(entry.table.begin(), entry.table.end(),
++                  [](const std::pair<uint64_t, uint64_t>& a,
++                     const std::pair<uint64_t, uint64_t>& b) {
++                      return a.first < b.first;
++                  });
++
++        SPDLOG_DEBUG("energy_model: domain {} (cpu{}) with {} OPPs",
++                     domain, first_cpu, entry.table.size());
++        powerData->domains.push_back(std::move(entry));
++    }
++
++    if (powerData->domains.empty()) {
++        SPDLOG_DEBUG("energy_model: no usable performance domains found");
++        return nullptr;
++    }
++    return powerData.release();
++}
++
+ static CPUPowerData_xgene* init_cpu_power_data_xgene(const std::string path) {
+     auto powerData = std::make_unique<CPUPowerData_xgene>();
+     std::string powerPath;
+@@ -775,7 +992,6 @@ bool CPUStats::InitCpuPowerData() {
+             }
+         }
+     }
+-
+     if (!cpuPowerData) {
+         std::string powercap = "/sys/class/powercap/";
+         auto powercap_dirs = ls(powercap.c_str());
+@@ -789,6 +1005,14 @@ bool CPUStats::InitCpuPowerData() {
+             }
+         }
+     }
++
++    // Devices such as Qualcomm Android targets expose neither hwmon nor a
++    // populated powercap, but they do publish a vendor-calibrated EAS energy
++    // model. Fall back to it so cpu_power works there as well.
++    if (!cpuPowerData) {
++        cpuPowerData = (CPUPowerData*)init_cpu_power_data_energy_model();
++    }
++
+     
+     if(cpuPowerData == nullptr) {
+         SPDLOG_ERROR("Failed to initialize CPU power data");
+@@ -922,4 +1146,4 @@ void CPUStats::get_cpu_cores_types_arm() {
+     }
+ }
+ 
+-CPUStats cpuStats;
++CPUStats cpuStats;
+\ No newline at end of file
+diff --git a/src/cpu.h b/src/cpu.h
+index d27c788..9478e8b 100644
+--- a/src/cpu.h
++++ b/src/cpu.h
+@@ -7,6 +7,7 @@
+ #include <cstdio>
+ #include <memory>
+ #include <string>
++#include <utility>
+ #ifdef WIN32
+ #include <windows.h>
+ #endif
+@@ -56,7 +57,8 @@ enum {
+    CPU_POWER_ZENERGY,
+    CPU_POWER_RAPL,
+    CPU_POWER_AMDGPU,
+-   CPU_POWER_XGENE
++   CPU_POWER_XGENE,
++   CPU_POWER_ENERGY_MODEL
+ };
+ 
+ struct CPUPowerData {
+@@ -153,14 +155,36 @@ struct CPUPowerData_xgene : public CPUPowerData {
+    CPUPowerData_xgene() {
+       this->source = CPU_POWER_XGENE;
+    };
+-
+    ~CPUPowerData_xgene() {
+       if(this->powerFile)
+          fclose(this->powerFile);
+    };
+-
+    FILE* powerFile {nullptr};
+ };
++// Android/Qualcomm EAS energy model support.
++// The kernel exposes a static power table per CPU performance domain under
++// /sys/kernel/debug/energy_model/<domain>/ps:<freq>/power (milliwatts), and the
++// per-frequency residency counters under
++// /sys/devices/system/cpu/cpuN/cpufreq/stats/time_in_state (milliseconds).
++// Power is the residency-weighted average of the table, which is exactly the
++// model the Android power HAL uses. No hardware energy counter is required.
++struct CPUPowerData_energy_model_domain {
++   int first_cpu = -1;
++   std::string time_in_state_path;
++   // frequency (kHz) -> power (mW), sorted ascending by frequency
++   std::vector<std::pair<uint64_t, uint64_t>> table;
++   // residency snapshot from the previous sample
++   std::vector<std::pair<uint64_t, uint64_t>> last_residency;
++   Clock::time_point lastSampleTime = Clock::now();
++   bool has_last = false;
++};
++
++struct CPUPowerData_energy_model : public CPUPowerData {
++   CPUPowerData_energy_model() {
++      this->source = CPU_POWER_ENERGY_MODEL;
++   };
++   std::vector<CPUPowerData_energy_model_domain> domains;
++};
+ 
+ class CPUStats
+ {
+@@ -240,4 +264,4 @@ extern CPUStats cpuStats;
+ #ifdef WIN32
+ uint64_t FileTimeToInt64( const FILETIME& ft );
+ #endif
+-#endif //MANGOHUD_CPU_H
++#endif //MANGOHUD_CPU_H
+\ No newline at end of file
+diff --git a/src/file_utils.cpp b/src/file_utils.cpp
+index 80e3031..d70a134 100644
+--- a/src/file_utils.cpp
++++ b/src/file_utils.cpp
+@@ -44,7 +44,15 @@ std::vector<std::string> ls(const char* root, const char* prefix, LS_FLAGS flags
+ 
+     DIR* dirp = opendir(root);
+     if (!dirp) {
+-        SPDLOG_ERROR("Error opening directory '{}': {}", root, strerror(errno));
++        // A missing /sys/class/hwmon is normal inside a Droidspaces container
++        // (the sysfs subtree is not mounted), so it is not an error worth
++        // shouting about on every scan. Report it at debug level; genuine
++        // permission problems still surface because callers handle an empty
++        // list the same way they always did.
++        if (errno == ENOENT)
++            SPDLOG_DEBUG("directory '{}' does not exist", root);
++        else
++            SPDLOG_ERROR("Error opening directory '{}': {}", root, strerror(errno));
+         return list;
+     }
+ 
+@@ -219,4 +227,4 @@ std::string to_lower(const std::string& str) {
+     return lowered;
+ }
+ 
+-#endif // __linux__
++#endif // __linux__
+\ No newline at end of file
+diff --git a/src/gpu_fdinfo.cpp b/src/gpu_fdinfo.cpp
+index 53cab4f..fbe644a 100644
+--- a/src/gpu_fdinfo.cpp
++++ b/src/gpu_fdinfo.cpp
+@@ -675,17 +675,26 @@ void GPU_fdinfo::init_kgsl() {
+         return;
+     }
+ 
+-    // Only GPU clocks accessible
+-    for (std::string metric : {"cur_freq" }) {
++    // Container adaptation: probe every KGSL metric that this kernel actually
++    // exposes instead of assuming one layout. The armada set assumed only
++    // `cur_freq` under devfreq, but a Droidspaces container exposes the older
++    // kgsl-3d0 layout where `clock_mhz`, `gpu_busy_percentage` and `temp` exist
++    // and `cur_freq` does not. Reading whichever files are present keeps GPU
++    // clock, load and temperature populated in either environment.
++    for (std::string metric : {"clock_mhz", "cur_freq", "gpu_busy_percentage", "temp"}) {
+         std::string p = sys_path + "/" + metric;
+-
+         if (!fs::exists(p)) {
+-            SPDLOG_WARN("kgsl: {} is not found", p);
++            SPDLOG_DEBUG("kgsl: {} is not found", p);
+             continue;
+         }
+-
+         SPDLOG_DEBUG("kgsl: {} found", p);
+-        kgsl_streams[metric].open(p);
++        if (metric == "clock_mhz" || metric == "cur_freq") {
++            // Remember the unit so get_kgsl_clock() can scale correctly.
++            gpu_clock_stream_unit_mhz = (metric == "clock_mhz");
++            gpu_clock_stream.open(p);
++        }
++        else
++            kgsl_streams[metric].open(p);
+     }
+ }
+ 
+@@ -726,6 +735,27 @@ int GPU_fdinfo::get_kgsl_temp() {
+ }
+ 
+ int GPU_fdinfo::get_kgsl_clock() {
++    // Two KGSL layouts exist and they differ in both file name and unit:
++    //   devfreq  cur_freq   -> Hz        (3d00000.gpu etc.)
++    //   kgsl-3d0 clock_mhz  -> MHz       (older msm kernels, what a container sees)
++    // The armada set only handled the first, so the clock silently read 0 on the
++    // second. Pick whichever stream was opened and scale accordingly.
++    if (gpu_clock_stream.is_open()) {
++        std::string freq_str;
++
++        gpu_clock_stream.seekg(0);
++
++        std::getline(gpu_clock_stream, freq_str);
++
++        if (freq_str.empty())
++            return 0;
++
++        // `clock_mhz` is already MHz; `cur_freq` is Hz.
++        return gpu_clock_stream_unit_mhz
++            ? std::round(std::stof(freq_str))
++            : std::round(std::stof(freq_str) / 1'000'000.f);
++    }
++
+     std::ifstream* s = &kgsl_streams["cur_freq"];
+ 
+     if (!s->is_open())
+@@ -740,7 +770,65 @@ int GPU_fdinfo::get_kgsl_clock() {
+     if (freq_str.empty())
+         return 0;
+ 
+-    return std::round(std::stoi(freq_str) / 1'000'000.f);
++    return std::round(std::stof(freq_str) / 1'000'000.f);
++}
++
++void GPU_fdinfo::init_thermal_zone_fallback() {
++    thermal_zone_tried = true;
++
++    // Droidspaces containers do not mount /sys/class/hwmon, so the msm driver's
++    // hwmon node is unreachable even though the GPU is real. The kernel still
++    // publishes the same junction temperature as a thermal zone; on Qualcomm
++    // platforms the GPU cluster is `gpuss-N` (older SoCs use `gpu-0-0-0`).
++    // Pick the first matching zone once, then reuse the stream.
++    static const char* prefixes[] = { "gpuss", "gpu-", "gpu_" };
++
++    std::error_code ec;
++    for (const char* prefix : prefixes) {
++        for (fs::directory_iterator it("/sys/class/thermal", ec), end;
++             !ec && it != end; it.increment(ec)) {
++            const std::string dir = it->path().string();
++            const std::string type_path = dir + "/type";
++            std::ifstream type_stream(type_path);
++            if (!type_stream.is_open())
++                continue;
++            std::string type;
++            std::getline(type_stream, type);
++            if (type.rfind(prefix, 0) != 0)
++                continue;
++
++            const std::string temp_path = dir + "/temp";
++            if (!fs::exists(temp_path))
++                continue;
++
++            thermal_zone_stream.open(temp_path);
++            if (thermal_zone_stream.is_open()) {
++                SPDLOG_DEBUG("thermal: using GPU zone {} ({})", dir, type);
++                return;
++            }
++        }
++        if (ec)
++            return;
++    }
++
++    SPDLOG_DEBUG("thermal: no GPU thermal zone available");
++}
++
++float GPU_fdinfo::get_thermal_zone_temp() {
++    if (!thermal_zone_tried)
++        init_thermal_zone_fallback();
++
++    if (!thermal_zone_stream.is_open())
++        return 0.f;
++
++    std::string temp_str;
++    thermal_zone_stream.seekg(0);
++    std::getline(thermal_zone_stream, temp_str);
++    if (temp_str.empty())
++        return 0.f;
++
++    // thermal_zone*/temp is millidegrees Celsius, same unit as hwmon temp*_input.
++    return std::round(std::stof(temp_str) / 1'000.f);
+ }
+ 
+ void GPU_fdinfo::main_thread()
+@@ -783,6 +871,12 @@ void GPU_fdinfo::main_thread()
+         else
+             metrics.temp = hwmon_sensors["temp"].val / 1000.f;
+ 
++        // Container fallback: when neither KGSL nor hwmon provided a temperature,
++        // read the GPU thermal zone. Without this the overlay shows 0 C inside
++        // Droidspaces, where /sys/class/hwmon is not mounted.
++        if (metrics.temp <= 0.f && (module == "msm_drm" || module == "msm_dpu"))
++            metrics.temp = get_thermal_zone_temp();
++
+         metrics.memory_temp = hwmon_sensors["vram_temp"].val / 1000.f;
+ 
+         metrics.fan_speed = hwmon_sensors["fan_speed"].val;
+@@ -809,4 +903,4 @@ void GPU_fdinfo::main_thread()
+             std::chrono::milliseconds(METRICS_UPDATE_PERIOD_MS)
+         );
+     }
+-}
++}
+\ No newline at end of file
+diff --git a/src/gpu_fdinfo.h b/src/gpu_fdinfo.h
+index a5b1d9e..3ecc2e0 100644
+--- a/src/gpu_fdinfo.h
++++ b/src/gpu_fdinfo.h
+@@ -92,6 +92,9 @@ private:
+     float last_power = 0;
+ 
+     std::ifstream gpu_clock_stream;
++    // `clock_mhz` reports MHz, `cur_freq` reports Hz; track which one is open so
++    // get_kgsl_clock() can scale without guessing. See init_kgsl().
++    bool gpu_clock_stream_unit_mhz = false;
+     void find_i915_gt_dir();
+     void find_xe_gt_dir();
+     int get_gpu_clock();
+@@ -120,6 +123,12 @@ private:
+     int get_kgsl_load();
+     int get_kgsl_temp();
+     int get_kgsl_clock();
++    // Container fallback: /sys/class/hwmon does not exist inside Droidspaces,
++    // so GPU temperature has to come from a thermal zone instead.
++    std::ifstream thermal_zone_stream;
++    bool thermal_zone_tried = false;
++    void init_thermal_zone_fallback();
++    float get_thermal_zone_temp();
+ 
+ public:
+     GPU_fdinfo(
+@@ -244,4 +253,4 @@ public:
+     }
+ 
+     float amdgpu_helper_get_proc_vram();
+-};
++};
+\ No newline at end of file
