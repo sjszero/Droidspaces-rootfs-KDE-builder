@@ -64,8 +64,8 @@ bash -n scripts/armada/as-user.sh
 
 运行验证中，`vulkaninfo --summary` 识别到 Turnip Adreno 750，gamescope 日志确认选择了该 GPU。Steam 已完成首次客户端更新。更新期间还发现两个独立问题：
 
-- 启动画面进度文件由上游硬编码的 `armada` 用户维护，Gold 无法写入。`scripts/armada/configure-armada-splash.py` 现在将状态写入脚本和 `/etc/tmpfiles.d/armada-run.conf` 的 splash 目录归属设为所选用户，同时保留 root 所有的 `/run/armada` 和其他规则。运行容器已应用相同修复。
-- 更新后的 ARM Steam 在原生 KGSL GL 路径中出现 DRI3/GBM dma-buf 导出失败，`steamwebhelper` 的 `SIGTRAP` 和 Steam 主进程退出码 1 已由进程跟踪确认。单独关闭 CEF GPU 加速以及禁用共享纹理均未解决。对照镜像内 Anland 参考启动脚本，游戏会话改用同一 Mesa 驱动包中的 Zink/Turnip，并只为 Steam 客户端命令预加载 `libXrandr.so.2`，解决 `XRRGetOutputInfo` 符号查找问题；无需关闭 GPU 加速。`scripts/armada/armada-steam-anland.sh` 只对 Anland 后端生效，并保留显式指定的 Vulkan ICD 和现有预加载库。
+- 启动画面进度文件由上游硬编码的 `armada` 用户维护，Gold 无法写入。`scripts/armada/configure/configure-armada-splash.py` 现在将状态写入脚本和 `/etc/tmpfiles.d/armada-run.conf` 的 splash 目录归属设为所选用户，同时保留 root 所有的 `/run/armada` 和其他规则。运行容器已应用相同修复。
+- 更新后的 ARM Steam 在原生 KGSL GL 路径中出现 DRI3/GBM dma-buf 导出失败，`steamwebhelper` 的 `SIGTRAP` 和 Steam 主进程退出码 1 已由进程跟踪确认。单独关闭 CEF GPU 加速以及禁用共享纹理均未解决。对照镜像内 Anland 参考启动脚本，游戏会话改用同一 Mesa 驱动包中的 Zink/Turnip，并只为 Steam 客户端命令预加载 `libXrandr.so.2`，解决 `XRRGetOutputInfo` 符号查找问题；无需关闭 GPU 加速。`scripts/armada/anland/armada-steam-anland.sh` 只对 Anland 后端生效，并保留显式指定的 Vulkan ICD 和现有预加载库。
 
 正式脚本已安装到运行容器，清除临时跟踪覆盖及无效测试参数后重新启动了游戏会话。Steam 使用 `-gamepadui -steamos3 -steampal -steamdeck`，大屏幕登录页已完成加载，读取到二维码登录与账号密码表单；gamescope 焦点为 Steam AppID `769`，实际 X11 窗口截图包含渲染内容。诊断证据和截图保存在 `~/.cache/armada-driver-maintenance/`。该验证未重启容器，冷启动和重建镜像仍需单独验证。
 
@@ -79,7 +79,7 @@ bash -n scripts/armada/as-user.sh
 
 根因与 Zink 无关：`/proc/<renderer>/maps` 显示 `steamwebhelper` 加载的是 Steam 自带的 `steamrtarm64/libEGL.so`、`libGLESv2.so`（ANGLE），CEF 不会使用系统 Mesa，因此 `MESA_LOADER_DRIVER_OVERRIDE=zink` 从未作用到 UI 的 GPU 进程，ANGLE 仍在原生 KGSL 上触发崩溃。镜像内 `producers/gamescope/ArmadaOS_v5/startup.sh` 中已标注为已验证的 KGSL/ANGLE 变通方案此前没有生效。
 
-修复在 `scripts/armada/armada-steam-anland.sh` 中追加 ANGLE 覆盖，并与 XRandR 预加载一样只作用于 Steam 客户端命令，不改动 gamescope：
+修复在 `scripts/armada/anland/armada-steam-anland.sh` 中追加 ANGLE 覆盖，并与 XRandR 预加载一样只作用于 Steam 客户端命令，不改动 gamescope：
 
 ```bash
 angle_features=${ANGLE_FEATURE_OVERRIDES_ENABLED:-}
@@ -98,7 +98,7 @@ CLIENTCMD="env LD_PRELOAD=libXrandr.so.2${LD_PRELOAD:+:${LD_PRELOAD}} ANGLE_FEAT
 
 截图确认右侧多选弹窗的偏移来自 gamescope 输出几何错误，而不是 Steam 面板布局：Android 当前横屏逻辑画布为 `2480x1116`，但 Anland gamescope 未收到 `SCREEN_WIDTH`/`SCREEN_HEIGHT`，Xwayland 因此使用默认 `1280x720` 的 16:9 画布。Steam 的居中计算基于这个错误画布，显示到实际面板后就表现为向右偏移。
 
-`scripts/armada/armada-steam-anland.sh` 现在在 Anland 后端默认导出 `SCREEN_WIDTH=2480`、`SCREEN_HEIGHT=1116`，同时允许外部环境变量覆盖，非 Anland 后端保持不变。运行容器已同步部署；重启 `gamescope-session-plus@steam.service` 后实测命令行包含 `-W 2480 -H 1116`，Xwayland 报告 `current 2480 x 1116`，输出为 `gamescope connected 2480x1116+0+0`，Steam 与 `steamwebhelper` 进程均保持运行。这确认 Steam 现在使用完整面板几何。
+`scripts/armada/anland/armada-steam-anland.sh` 现在在 Anland 后端默认导出 `SCREEN_WIDTH=2480`、`SCREEN_HEIGHT=1116`，同时允许外部环境变量覆盖，非 Anland 后端保持不变。运行容器已同步部署；重启 `gamescope-session-plus@steam.service` 后实测命令行包含 `-W 2480 -H 1116`，Xwayland 报告 `current 2480 x 1116`，输出为 `gamescope connected 2480x1116+0+0`，Steam 与 `steamwebhelper` 进程均保持运行。这确认 Steam 现在使用完整面板几何。
 
 本轮新增 2 项自动化测试；针对性测试 10 项通过，完整回归 71 项通过、1 项按条件跳过，Shell 语法和 `git diff --check` 通过。Android 截图工具未能从当前帧提取文字，因此弹窗的最终视觉位置仍需用户在设备上重新打开同一多选弹窗确认。
 
@@ -173,7 +173,7 @@ exec "${ARMADA_STARTPLASMA:-/usr/bin/startplasma-wayland}"
 
 一个关键陷阱：这些变量**不能**从 `sddm.service` 的 drop-in 注入。`sddm-helper` 会用 PAM 加自己的白名单重建会话环境，实测 `systemctl show sddm -p Environment` 明明列着 `ANLAND=1`，会话进程里却是空值（`set -x` trace 显示走了 `[[ 0 == 1 ]]` 的未命中分支）。所以修复必须落在会话脚本自身。
 
-修复方式（`scripts/armada/patch-armada-plasma-session.py` + Dockerfile 第 7i 节）：
+修复方式（`scripts/armada/anland/patch-armada-plasma-session.py` + Dockerfile 第 7i 节）：
 
 - 脚本自己检测 `/run/display.sock`，命中就导出全套 Anland 环境，并改用 `exec dbus-run-session startplasma-wayland`；没命中则保持上游原样的裸 `exec`，非 Anland 容器行为不变。
 - 补丁是精确匹配的：上游改了这段就构建失败，而不是静默跳过产出一个没有 Anland 后端的桌面。重复执行会识别为已打过补丁，保持幂等。
@@ -284,7 +284,7 @@ kwin_wayland[19918]: No suitable DRM devices have been found
 
 - 运行容器：`systemctl stop sddm` → `dnf remove xorg-x11-server-Xwayland-devel --setopt=clean_requirements_on_remove=False` → `install-anland-kde -1` → 校验 → `systemctl start sddm`。
 - 仓库：`ArmadaOS.Dockerfile` 在 `DISPLAY_BACKEND=anland-wayland` 分支里实际执行安装（含上述 devel 冲突处理），并修正了那段过时注释。
-- 仓库：新增 `scripts/armada/verify-anland-kwin.py`，构建期断言所有 KWin 包为 `anland` 构建且二进制导出 `AnlandBackend`，不满足就让构建失败。
+- 仓库：新增 `scripts/armada/anland/verify-anland-kwin.py`，构建期断言所有 KWin 包为 `anland` 构建且二进制导出 `AnlandBackend`，不满足就让构建失败。
 
 实测（运行容器）：`kwin`/`kwin-common`/`kwin-libs` 均为 `6.7.5-1.anland.fc44`，`xorg-x11-server-Xwayland` 为 `24.1.14-1.anland.fc44`，`strings /usr/bin/kwin_wayland | grep AnlandBackend` 命中。`systemctl start sddm` 后 KWin PID 稳定在 27892（连续 9 秒不变），`plasmashell`、`kioworker` 均在运行，画面恢复。日志出现 `consumer disconnected, entering fallback`，说明 Anland 后端已接管。
 
@@ -293,7 +293,7 @@ kwin_wayland[19918]: No suitable DRM devices have been found
 仍未验证：
 
 - 镜像未重建。上述 Dockerfile 改动只经过 `bash -n`、`shellcheck`、`git diff --check` 和抽取块语法校验，没有跑过真实构建。
-- 未提交 git。`ArmadaOS.Dockerfile` 为 modified，`scripts/armada/verify-anland-kwin.py` 等脚本为新增。
+- 未提交 git。`ArmadaOS.Dockerfile` 为 modified，`scripts/armada/anland/verify-anland-kwin.py` 等脚本为新增。
 - 冷启动桌面模式未验证。
 - `Rendering a layer failed!` 未复现定位。
 
@@ -312,7 +312,7 @@ kwin_wayland[19918]: No suitable DRM devices have been found
 
 Armada 基础镜像会从两个配置入口把 Bazaar 固定到 Plasma 任务栏：首次初始化脚本 `armada-pins.js` 的 `icontasks.launchers` 默认列表，以及 `kicker-extra-favoritesrc` 的 `Prepend` 收藏列表。只删桌面文件或 Flatpak 包不够，因为 pin 配置仍会保留失效图标。
 
-仓库新增 `scripts/armada/patch-armada-remove-bazaar-pin.py`，在 Dockerfile 构建期只移除精确 ID `io.github.kolunmi.Bazaar.desktop`，其余启动器顺序与配置不变。脚本会先同时校验两个文件的锚点，再写入；重复执行通过 marker 幂等；上游结构变化或目标项数量不符时构建失败，避免半改或静默漏改。Dockerfile 随后对两处文件做 `grep` 断言，并在成功后移除临时脚本。
+仓库新增 `scripts/armada/configure/patch-armada-remove-bazaar-pin.py`，在 Dockerfile 构建期只移除精确 ID `io.github.kolunmi.Bazaar.desktop`，其余启动器顺序与配置不变。脚本会先同时校验两个文件的锚点，再写入；重复执行通过 marker 幂等；上游结构变化或目标项数量不符时构建失败，避免半改或静默漏改。Dockerfile 随后对两处文件做 `grep` 断言，并在成功后移除临时脚本。
 
 验证：独立副本首次运行和第二次运行均通过；目标 ID 在两个配置副本中都不存在；人为移除预期锚点的反例返回非零，且另一文件未被部分改写。Python 编译、Dockerfile 该 RUN 块 `bash -n`、`git diff --check` 通过。
 
@@ -394,7 +394,7 @@ exclude=xdg-desktop-portal*,mesa*,systemd*
 未重建镜像（本容器 rootless Podman 因 `newuidmap` 无 setuid/filecaps 无法启动，rootful 存储亦不可用），因此 `#120` 之后剩余 2 层与最终导出 RootFS 未实测。上述验证是等价的 shell 级复现，不是容器内真跑。未提交或推送 Git。
 
 ## 2026-11-07 game-tweaks 环境默认值
-新增脚本 `scripts/armada/configure-armada-game-tweaks-env.py`，接入 `ArmadaOS.Dockerfile` 的 `8c` 段。
+新增脚本 `scripts/armada/configure/configure-armada-game-tweaks-env.py`，接入 `ArmadaOS.Dockerfile` 的 `8c` 段。
 Armada 读取两份配置：`/usr/share/armada/game-tweaks.json` 是工厂默认值（**没有 `env` 块**），`/etc/armada/game-tweaks.json` 是覆盖层，`armada_game_tweaks.py` 用 `data["global"].update(overrides)` 做浅合并。脚本只往覆盖层写入 `global.env.MESA_LOADER_DRIVER_OVERRIDE=kgsl`，不动工厂文件。
 行为约束：
 - 已有覆盖文件保留全部既有键，包括手工添加的 `env` 条目；
@@ -409,6 +409,12 @@ Armada 读取两份配置：`/usr/share/armada/game-tweaks.json` 是工厂默认
 - **降级发行版包**：armada 的 MangoHud 针对裸机 Qualcomm 硬件打了九个补丁（msm_dpu/msm_drm fdinfo 识别、GPU 监控、SM8750 电池与内存名称），容器内这些读数并不描述真实设备；但这不构成降级理由，按需在容器内单独处理即可。
 ### 仍未验证
 未重建镜像；本次验证是在当前容器内直接执行脚本，等价于 Dockerfile 中对应 RUN 块的命令序列，但不是完整镜像构建。
+### 2026-11-08 该脚本已删除
+`configure-armada-game-tweaks-env.py` 与 Dockerfile 的 `8c` 段整体移除。
+当初的理由是"容器内 render node 通过 Android 显示栈暴露，Mesa 会去找不存在的 DRM 设备"。这个判断不成立，而该覆盖层写入的是 `global.env`，对**所有**游戏生效，包括原生 ARM64 Proton：
+- 原生路径上强制 `kgsl` 正常（`glxinfo` 出 FD750），不强制时走 zink 也正常，两者都可用，所以覆盖值本身不是必需的；
+- 强制 `kgsl` 反而有害：容器里的 `/usr/lib/dri` 指向 guestos 的 x86 Mesa，Mesa 会去加载跑不起来的 x86 DRI 驱动，日志报 `failed to load driver: kgsl`，回退 zink 又撞上 Vulkan 串连失败，最终 GL 完全起不来。
+`/etc/environment` 里那份 `MESA_LOADER_DRIVER_OVERRIDE=kgsl`（Dockerfile 第 8a 段）保留不动：它只用于原生 aarch64 会话，实测正常。
 
 ## 2026-11-07 MangoHud 容器指标补丁
 容器里的 MangoHud 指标全为 0，实测日志给出三处失效：
@@ -419,7 +425,7 @@ Armada 读取两份配置：`/usr/share/armada/game-tweaks.json` 是工厂默认
 [debug]   load = 0, proc_vram = 0, power = 0, core = 0, temp = 0
 ```
 根因是 armada 补丁集只读 devfreq `cur_freq`（Hz），而容器内核暴露的是老式 `kgsl-3d0` 布局，频率在 `clock_mhz`（MHz），`cur_freq` 不存在；同时 `/sys/class/hwmon` 整个未挂载。
-### 补丁：`scripts/armada/mangohud-container-metrics.patch`
+### 补丁：`scripts/armada/mangohud/mangohud-container-metrics.patch`
 | 位置 | 改动 |
 | --- | --- |
 | `init_kgsl()` | 探测 `clock_mhz`/`cur_freq`/`gpu_busy_percentage`/`temp`，存在哪个开哪个，不再假设单一布局 |
@@ -462,7 +468,7 @@ Armada 读取两份配置：`/usr/share/armada/game-tweaks.json` 是工厂默认
 
 GPU 功耗**无法获取**：`energy_model` 只含 cpu0/2/5/7，GPU OPP 的 `u_watt`/`u_volt_target`/`u_amp` 全为 0（厂商未填充），kgsl debugfs 无任何功耗节点。要真实读数只能改内核让 kgsl 注册 hwmon/powercap，超出容器范围。
 
-### 开机自动放行：`scripts/armada/mangohud-energy-model.service`
+### 开机自动放行：`scripts/armada/mangohud/mangohud-energy-model.service`
 `energy_model` 在 debugfs 下，挂载点权限是 `drwx------ root:root`，普通用户读不到。装成 systemd oneshot：
 
 - `ExecStart`：debugfs 未挂载则先挂，再把挂载点 `chmod 0755`（只放开目录，内部文件仍由内核控制）
@@ -470,12 +476,12 @@ GPU 功耗**无法获取**：`energy_model` 只含 cpu0/2/5/7，GPU OPP 的 `u_w
 - `WantedBy=multi-user.target`，镜像构建时 `systemctl enable`
 
 冷启动场景已实测：手动 `chmod 700` 模拟重启后权限状态 → 用户读不到 → `systemctl restart` → 恢复可读 → MangoHud 重新识别出 4 个域。
-### 构建脚本：`scripts/armada/build-mangohud-container.sh`
+### 构建脚本：`scripts/armada/mangohud/build-mangohud-container.sh`
 从 `~/armada/packages/mangohud` 取 spec、`BASE.env` 与 9 个补丁，叠加本仓库补丁后产出 RPM。`Version` 与 `ARMADA_MARCH` 都从 armada 配方读取，不硬编码。
 ```bash
-scripts/armada/build-mangohud-container.sh              # 只构建
-scripts/armada/build-mangohud-container.sh --install    # 构建并安装
-scripts/armada/build-mangohud-container.sh --dry-run    # 只打印解析结果
+scripts/armada/mangohud/build-mangohud-container.sh              # 只构建
+scripts/armada/mangohud/build-mangohud-container.sh --install    # 构建并安装
+scripts/armada/mangohud/build-mangohud-container.sh --dry-run    # 只打印解析结果
 ```
 接入 `ArmadaOS.Dockerfile` 的 `8d` 段：克隆 armada 树 → 构建 → 安装 → 清理。
 脚本处理了两个宿主限制：

@@ -191,7 +191,6 @@ RUN set -eux; \
         armada-splash-stall.service \
         armada-splash-reboot-screen.service \
         armada-splash-poweroff-screen.service \
-        armada-guestos.service \
         usr-share-guestos-android.mount \
         armada-waydroid-input.service \
         waydroid-container.service \
@@ -1228,10 +1227,20 @@ EOF_SDDM95
 
 COPY <<'EOF_PREPARE' /usr/libexec/armada/prepare-anland-session
 #!/usr/bin/bash
-# Android containers have no Linux VTs. A tty1 -> /dev/null placeholder makes
-# SDDM issue TIOCSCTTY to /dev/null and exit before any producer can wait.
+# Android containers have no Linux VTs, but the container runtime still creates
+# a /dev/tty1 node. That node is a fake: it is either a symlink to /dev/null or
+# a char device carrying /dev/null's device numbers (1,3), and the kernel
+# exposes no tty1 class entry behind it. SDDM trusts the node, issues TIOCSCTTY
+# and dies with HELPER_TTY_ERROR (exit code 5) before any producer can wait, so
+# the node has to go.
+#
+# The runtime's node shape is not part of any contract and has already changed
+# once (Droidspaces v7.2.0 switched the symlink for a char device), which broke
+# the previous "symlink to /dev/null" test and left SDDM looping on a dead VT.
+# Probe the kernel instead of the node: a real VT always has a tty1 entry under
+# /sys/class/tty, so anything present at /dev/tty1 without one is a placeholder.
 set -uo pipefail
-if [[ ! -e /dev/tty0 && -L /dev/tty1 ]] && [[ $(readlink -f /dev/tty1) == /dev/null ]]; then
+if [[ ! -e /sys/class/tty/tty1 ]] && [[ -e /dev/tty1 || -L /dev/tty1 ]]; then
     rm -- /dev/tty1 || exit 1
     printf '%s\n' 'armada: removed container tty1 placeholder; SDDM will run without a VT'
 fi
@@ -1315,14 +1324,14 @@ EOF_KWALLET
 # producer environment and a session bus. The substitution is exact-match and
 # fails the build if upstream changes the line, which is preferable to shipping
 # a session that silently starts without the Anland backend.
-COPY scripts/armada/patch-armada-plasma-session.py /tmp/patch-armada-plasma-session.py
+COPY scripts/armada/anland/patch-armada-plasma-session.py /tmp/patch-armada-plasma-session.py
 RUN python3 /tmp/patch-armada-plasma-session.py \
         /usr/libexec/armada/armada-plasma-session && \
     bash -n /usr/libexec/armada/armada-plasma-session && \
     rm -f /tmp/patch-armada-plasma-session.py
 
 # Remove Bazaar from both the initial taskbar pin script and KRunner favorites.
-COPY scripts/armada/patch-armada-remove-bazaar-pin.py /tmp/patch-armada-remove-bazaar-pin.py
+COPY scripts/armada/configure/patch-armada-remove-bazaar-pin.py /tmp/patch-armada-remove-bazaar-pin.py
 RUN python3 /tmp/patch-armada-remove-bazaar-pin.py \
         /usr/share/plasma/shells/org.kde.plasma.desktop/contents/updates/armada-pins.js \
         /usr/share/kde-settings/kde-profile/default/xdg/kicker-extra-favoritesrc && \
@@ -1349,8 +1358,8 @@ EOF_SDDM_ARMADA
 
 # Anland's Android consumer can connect well after the system boots. Keep the
 # vendor session lifecycle, but wait on its startup FIFO while gamescope lives.
-COPY scripts/armada/armada-gamescope-startup.sh /usr/libexec/armada/gamescope-startup-wait
-COPY scripts/armada/patch-armada-gamescope-startup.py /tmp/patch-armada-gamescope-startup.py
+COPY scripts/armada/anland/armada-gamescope-startup.sh /usr/libexec/armada/gamescope-startup-wait
+COPY scripts/armada/anland/patch-armada-gamescope-startup.py /tmp/patch-armada-gamescope-startup.py
 RUN python3 /tmp/patch-armada-gamescope-startup.py /usr/share/gamescope-session-plus/gamescope-session-plus && \
     bash -n /usr/libexec/armada/gamescope-startup-wait && \
     bash -n /usr/share/gamescope-session-plus/gamescope-session-plus && \
@@ -1387,7 +1396,7 @@ EOF_GAMESCOPE_UX
 EOF_RUN
 # Use Zink over the shared Turnip driver for the ARM Steam UI on Anland.
 # Native KGSL GL fails CEF's GBM/dma-buf sharing; XRandR needs early real symbols.
-COPY scripts/armada/armada-steam-anland.sh /usr/libexec/armada/steam-anland-env
+COPY scripts/armada/anland/armada-steam-anland.sh /usr/libexec/armada/steam-anland-env
 RUN if [ "$DISPLAY_BACKEND" = anland-wayland ]; then \
         install -d /etc/gamescope-session-plus/sessions.d; \
         printf '\nsource /usr/libexec/armada/steam-anland-env\n' \
@@ -1395,7 +1404,6 @@ RUN if [ "$DISPLAY_BACKEND" = anland-wayland ]; then \
         bash -n /etc/gamescope-session-plus/sessions.d/steam; \
     fi && \
     bash -n /usr/libexec/armada/steam-anland-env
-
 # Desktop mode needs the Anland-patched KWin, not the distribution one. The base
 # armada image ships kwin-6.7.5-1.fc44.armada, which has no Anland backend: it
 # falls back to DRM, finds no /dev/dri/card0 inside a container, and dies in a
@@ -1410,7 +1418,7 @@ RUN if [ "$DISPLAY_BACKEND" = anland-wayland ]; then \
 # depends on it, so dropping it is what lets the transaction resolve. Xwayland
 # itself is kept.
 # The trailing checks fail the build here rather than on a user's black screen.
-COPY scripts/armada/verify-anland-kwin.py /tmp/verify-anland-kwin.py
+COPY scripts/armada/anland/verify-anland-kwin.py /tmp/verify-anland-kwin.py
 RUN if [ "$DISPLAY_BACKEND" = anland-wayland ]; then \
         rpm -q xorg-x11-server-Xwayland-devel >/dev/null 2>&1 && \
             dnf -y remove xorg-x11-server-Xwayland-devel \
@@ -1443,7 +1451,7 @@ EOF_SESSION_DEFAULT
 
 # Decky's vendor image pins /var/home/armada and can bundle the x86_64
 # PluginLoader. Use the requested account and a native ARM64 loader.
-COPY scripts/armada/configure-armada-decky.py /tmp/configure-armada-decky.py
+COPY scripts/armada/configure/configure-armada-decky.py /tmp/configure-armada-decky.py
 RUN python3 /tmp/configure-armada-decky.py "${USERNAME}" && \
     rm -f /tmp/configure-armada-decky.py
 # Armada Control ships from the base image and assumes the hardware accounts:
@@ -1452,7 +1460,7 @@ RUN python3 /tmp/configure-armada-decky.py "${USERNAME}" && \
 # "armada". Neither exists here, so Desktop/Mobile reads always reported
 # "desktop" and writes failed with "No such file or directory". Point the read
 # path at the container session state and run session helpers as USERNAME.
-COPY scripts/armada/patch-armada-container-desktop-mode.py /tmp/patch-armada-container-desktop-mode.py
+COPY scripts/armada/anland/patch-armada-container-desktop-mode.py /tmp/patch-armada-container-desktop-mode.py
 RUN python3 /tmp/patch-armada-container-desktop-mode.py \
         /usr/libexec/armada/armada-control "${USERNAME}" && \
     rm -f /tmp/patch-armada-container-desktop-mode.py
@@ -1463,7 +1471,7 @@ EOF_CONTROL_SESSION_USER
 
 # Steam runs as USERNAME; both its status writer and the boot-created splash
 # directory must use that account, or the loading screen never shows progress.
-COPY scripts/armada/configure-armada-splash.py /tmp/configure-armada-splash.py
+COPY scripts/armada/configure/configure-armada-splash.py /tmp/configure-armada-splash.py
 RUN python3 /tmp/configure-armada-splash.py "${USERNAME}" && \
     bash -n /usr/libexec/armada/armada-splash-progress && \
     rm -f /tmp/configure-armada-splash.py
@@ -1655,17 +1663,6 @@ for unit in gamescope-session-plus@steam.service armada-steam-desktop.service; d
         > "/etc/systemd/user/${unit}.d/60-armada-steam-runtime.conf"
 done
 EOF_RUN
-# 8c. Seed the container's game-tweaks environment overrides.
-# /usr/share/armada/game-tweaks.json (factory defaults) has no "env" block, so
-# Armada's tweak wrapper never pins the Mesa loader. Inside Droidspaces the
-# render node arrives through the Android display stack, so KGSL has to be
-# selected explicitly or Mesa probes for a DRM device that is not present.
-# This writes only the /etc override layer and never touches the factory file.
-COPY scripts/armada/configure-armada-game-tweaks-env.py /usr/local/sbin/configure-armada-game-tweaks-env
-RUN set -eux; \
-    chmod 0755 /usr/local/sbin/configure-armada-game-tweaks-env; \
-    /usr/local/sbin/configure-armada-game-tweaks-env; \
-    python3 -c 'import json,sys; d=json.load(open("/etc/armada/game-tweaks.json")); sys.exit(0 if d["global"]["env"]["MESA_LOADER_DRIVER_OVERRIDE"] == "kgsl" else 1)'
 # 8d. MangoHud rebuilt with the container metric patch.
 # The armada package reads sysfs paths a Droidspaces container does not mount:
 # it wants devfreq `cur_freq` (Hz) for the GPU clock, but the container exposes
@@ -1684,9 +1681,9 @@ RUN set -eux; \
 # its declaration line downwards; the single definition lives at the "9." pin
 # block below, which is too late for this step. Keep both values identical.
 ARG ARMADA_COMMIT=d5c23cd7831a765942559a0351859a7577afc18b
-COPY scripts/armada/mangohud-container-metrics.patch /tmp/mangohud-container-metrics.patch
-COPY scripts/armada/build-mangohud-container.sh /usr/local/sbin/build-mangohud-container
-COPY scripts/armada/mangohud-energy-model.service /usr/lib/systemd/system/mangohud-energy-model.service
+COPY scripts/armada/mangohud/mangohud-container-metrics.patch /tmp/mangohud-container-metrics.patch
+COPY scripts/armada/mangohud/build-mangohud-container.sh /usr/local/sbin/build-mangohud-container
+COPY scripts/armada/mangohud/mangohud-energy-model.service /usr/lib/systemd/system/mangohud-energy-model.service
 RUN set -eux; \
     chmod 0755 /usr/local/sbin/build-mangohud-container; \
     dnf -y install --setopt=install_weak_deps=False git; \

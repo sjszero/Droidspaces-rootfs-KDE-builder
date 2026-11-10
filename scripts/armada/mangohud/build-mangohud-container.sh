@@ -13,7 +13,7 @@
 #   * /sys/class/hwmon does not exist, so the msm GPU hwmon node is unreachable
 #     and every scan logs an error.
 #
-# scripts/armada/mangohud-container-metrics.patch fixes both. This script
+# scripts/armada/mangohud/mangohud-container-metrics.patch fixes both. This script
 # applies it on top of the armada patch set and produces a drop-in RPM.
 #
 # What it needs
