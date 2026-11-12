@@ -402,11 +402,14 @@ Armada 读取两份配置：`/usr/share/armada/game-tweaks.json` 是工厂默认
 - JSON 损坏时以非零退出，绝不静默重写；
 - `ARMADA_GAME_TWEAKS_OVERRIDES` 可指向暂存副本，供镜像构建与测试使用。
 实测 5 个场景全部通过：新建、幂等重跑、保留其它键、保留用户自定义值、损坏文件拒绝覆盖。
-### MangoHud 不再干预
-镜像不再对 MangoHud 做任何处理：既不降级发行版包，也不从源码构建，完全沿用基镜像自带的版本。原先的 `8c` 降级段（把 armada 的 `0.8.4-1.fc44.armada` 降为 `0.8.3~rc1-2.fc44`）已删除。
-历史上试过两种替代方案，均已放弃，记录原因避免重复踩坑：
-- **上游源码构建**：`mangoapp` 与 `glfw` 存在硬冲突——上游 `meson.build` 在 `mangoapp=true` 时追加 `imgui_options += ['glfw=enabled']`，而 `glfw-devel` 依赖 `pkgconfig(dri)`（来自 `mesa-libGL-devel`），本镜像 `dnf.conf` 有 `exclude=...mesa*`。**不要用 `--setopt=exclude=` 绕过该排除**：实测会把 Mesa 从 26.2.5 升级到 26.2.6 并删除多个 mesa 子包，破坏 KGSL/Turnip 栈。回滚需同样绕过 exclude 执行 `dnf history undo`。源码构建还需额外安装 `yaml-cpp-devel`、`libstdc++-static`，并显式关闭默认 `enabled` 的 `with_xnvctrl`/`with_nvml`。
-- **降级发行版包**：armada 的 MangoHud 针对裸机 Qualcomm 硬件打了九个补丁（msm_dpu/msm_drm fdinfo 识别、GPU 监控、SM8750 电池与内存名称），容器内这些读数并不描述真实设备；但这不构成降级理由，按需在容器内单独处理即可。
+### MangoHud 改用上游源码（2026-11-12）
+镜像现在从上游 MangoHud 源码构建，不再使用 armada 打过九个补丁的分支。原先的 `8c` 降级段（把 `0.8.4-1.fc44.armada` 降为 `0.8.3~rc1-2.fc44`）早已删除，`8d` 段也从「克隆 armada 树 + 套 armada 补丁集」改为「克隆上游 pinned commit + 套本仓库容器补丁」。
+
+切换理由：armada 分支只在裸机上成立，容器里 GPU 占用/温度恒为 0；而 Fedora 仓库只有 `0.8.3~rc1`，比 armada 的 0.8.4 更旧，不能作为替代。上游 master 自带 `MSM_KGSL`/`MSM_DPU` 后端，正好对应容器暴露的 sysfs 布局。
+
+失败的旧方案记录，避免重复踩坑：
+- **`mangoapp` 与 `glfw` 存在硬冲突**：上游 `meson.build` 在 `mangoapp=true` 时追加 `imgui_options += ['glfw=enabled']`，而 `glfw-devel` 依赖 `pkgconfig(dri)`（来自 `mesa-libGL-devel`），本镜像 `dnf.conf` 有 `exclude=...mesa*`。**不要用 `--setopt=exclude=` 绕过该排除**：实测会把 Mesa 从 26.2.5 升级到 26.2.6 并删除多个 mesa 子包，破坏 KGSL/Turnip 栈。回滚需同样绕过 exclude 执行 `dnf history undo`。构建脚本在 mesa 尚未被锁定前运行，直接装 `glfw-devel`，失败时回退为「只提取头文件 + `glfw3.pc` + `libglfw.so` 符号链接」。
+- **降级发行版包**：不可行，Fedora 只有 `0.8.3~rc1`，比 armada 的 0.8.4 旧。
 ### 仍未验证
 未重建镜像；本次验证是在当前容器内直接执行脚本，等价于 Dockerfile 中对应 RUN 块的命令序列，但不是完整镜像构建。
 ### 2026-11-08 该脚本已删除
@@ -426,13 +429,19 @@ Armada 读取两份配置：`/usr/share/armada/game-tweaks.json` 是工厂默认
 ```
 根因是 armada 补丁集只读 devfreq `cur_freq`（Hz），而容器内核暴露的是老式 `kgsl-3d0` 布局，频率在 `clock_mhz`（MHz），`cur_freq` 不存在；同时 `/sys/class/hwmon` 整个未挂载。
 ### 补丁：`scripts/armada/mangohud/mangohud-container-metrics.patch`
+
+补丁基于上游 `MANGOHUD_COMMIT=791f920` 重写，共 3 个文件、304 行。上游 master 自带 `MSM_KGSL` 后端（`mangohud-next/server/metrics/gpu/msm/kgsl.*`），已经把 kgsl-3d0 当作 hwmon 目录来读，所以旧版针对 `init_kgsl()`/`get_kgsl_clock()` 的改动不再需要。
+
 | 位置 | 改动 |
 | --- | --- |
-| `init_kgsl()` | 探测 `clock_mhz`/`cur_freq`/`gpu_busy_percentage`/`temp`，存在哪个开哪个，不再假设单一布局 |
-| `get_kgsl_clock()` | 新增 `gpu_clock_stream_unit_mhz` 标志，按单位换算（MHz 直出 / Hz 除 1e6） |
-| 新增 thermal 兜底 | `init_thermal_zone_fallback()` + `get_thermal_zone_temp()`，KGSL/hwmon 都拿不到时读 `gpuss-N` thermal zone |
-| `file_utils.cpp ls()` | 目录不存在是 `ENOENT` 而非错误，降到 debug，避免每次扫描刷 journal |
-实测修复前后：`load 0→28`、`core 0→366`、`temp 0→47`。
+| `mangohud-next/server/metrics/hwmon.cpp` `find_sensors()` | 去掉「文件名必须含 `_`」的前置过滤，改为仅在需要读 `*_label` 时才检查。kgsl-3d0 的 `temp` 没有下划线也没有 label，旧逻辑直接丢弃它，导致温度恒为 0 |
+| `src/cpu.h` | 新增 `CPU_POWER_ENERGY_MODEL`、`CPUPowerData_energy_model(_domain)` |
+| `src/cpu.cpp` `read_time_in_state()` / `get_cpu_power_energy_model()` | 读 EAS 功耗表 × 频率驻留增量，做加权平均 |
+| `src/cpu.cpp` `init_cpu_power_data_energy_model()` | 解析 `/sys/kernel/debug/energy_model/<域>/cpus` 与 `ps:<freq>/{frequency,power}` |
+| `src/cpu.cpp` `InitCpuPowerData()` | 在 hwmon/APU/deckard/powercap 全部失败后回退到 energy model |
+
+实测（安装新 RPM 后，`MANGOHUD_LOG_LEVEL=debug` 跑 `vkcube`）：`hwmon: temp reading found at /sys/class/kgsl/kgsl-3d0/temp`、`load 0→3`、`CoreClock 231`、`temp 0→33`，`energy_model` 识别出 4 个域（cpu0/2/5/7，18/32/29/37 个 OPP）。
+
 仍然为 0 的是 `power`/`proc_vram`/`fan`/`voltage`：msm 驱动只通过 hwmon 暴露这些，容器无 hwmon 即无数据源；统一内存架构也没有独立 VRAM。这些不做假值填充。
 ### CPU 功耗：走内核 EAS energy model
 `cpu_power` 原先恒为 0，因为 MangoHud 只会从 `hwmon`（k10temp/zenpower/zenergy/apm_xgene）、`powercap`（RAPL）或 AMD APU 取功耗，这台设备三者都没有。实测确认：
@@ -477,16 +486,18 @@ GPU 功耗**无法获取**：`energy_model` 只含 cpu0/2/5/7，GPU OPP 的 `u_w
 
 冷启动场景已实测：手动 `chmod 700` 模拟重启后权限状态 → 用户读不到 → `systemctl restart` → 恢复可读 → MangoHud 重新识别出 4 个域。
 ### 构建脚本：`scripts/armada/mangohud/build-mangohud-container.sh`
-从 `~/armada/packages/mangohud` 取 spec、`BASE.env` 与 9 个补丁，叠加本仓库补丁后产出 RPM。`Version` 与 `ARMADA_MARCH` 都从 armada 配方读取，不硬编码。
+从上游 `MANGOHUD_COMMIT` 取源码，套本仓库容器补丁后产出 RPM。脚本不再依赖 `~/armada`：`MANGOHUD_COMMIT` 在 Dockerfile 与本脚本中各有一份默认值，两者必须一致。
 ```bash
 scripts/armada/mangohud/build-mangohud-container.sh              # 只构建
 scripts/armada/mangohud/build-mangohud-container.sh --install    # 构建并安装
 scripts/armada/mangohud/build-mangohud-container.sh --dry-run    # 只打印解析结果
 ```
-接入 `ArmadaOS.Dockerfile` 的 `8d` 段：克隆 armada 树 → 构建 → 安装 → 清理。
-脚本处理了两个宿主限制：
+接入 `ArmadaOS.Dockerfile` 的 `8d` 段：`git clone` 上游 → checkout pinned commit → 构建 → 安装 → 清理。
+脚本处理了三个宿主限制：
 1. **glfw-devel 装不上**（`pkgconfig(dri)` ← `mesa-libGL-devel`，被 `exclude=...mesa*` 挡住）。改为 `dnf download` 后只提取头文件、`glfw3.pc` 和 `libglfw.so` 符号链接，不碰 mesa。
 2. **BuildRequires 无法满足** `pkgconfig(dri)`/`pkgconfig(glfw3)`。用 `--nodeps` 只跳过这道门禁，实际编译仍链接已提取的 glfw。
-构建前会先用 `--fuzz=0` 验证整条补丁链可干净应用，漂移即硬失败，不会静默偏移。
+3. **`mangoplot` 的 `#!/usr/bin/env python` shebang 被 rpm 判为 ambiguous**（`%install` 阶段直接失败）。在 spec 里改写成 `#!/usr/bin/python3` 并联同其它文件一起打包。
+构建前会先用 `--fuzz=0` 验证补丁可干净应用，漂移即硬失败，不会静默偏移。
+meson subproject 全部预下载并做 SHA256 校验，通过 `MESON_PACKAGE_CACHE_DIR` 交给 meson，避免 `%build` 阶段才去联网。
 ### 仍未验证
 脚本已在容器内端到端实跑（含 `--install`，产出 1.9M RPM 并生效）；未重建完整镜像。

@@ -215,6 +215,7 @@ RUN set -eux; \
         systemd-suspend-then-hibernate.service \
         flatpak-add-fedora-repos.service \
         armada-save-devcoredump@.service \
+        armada-guestos.service \
         bluetooth.service; do \
         ln -sf /dev/null "/etc/systemd/system/${unit}"; \
     done; \
@@ -1663,41 +1664,35 @@ for unit in gamescope-session-plus@steam.service armada-steam-desktop.service; d
         > "/etc/systemd/user/${unit}.d/60-armada-steam-runtime.conf"
 done
 EOF_RUN
-# 8d. MangoHud rebuilt with the container metric patch.
-# The armada package reads sysfs paths a Droidspaces container does not mount:
-# it wants devfreq `cur_freq` (Hz) for the GPU clock, but the container exposes
-# the older kgsl-3d0 layout where the clock is `clock_mhz` (MHz), and
-# /sys/class/hwmon does not exist at all. Without the patch the overlay shows
-# GPU clock/load/temperature as 0.
-# The patch lives in this repo; the script applies it on top of the armada
-# recipe's own patch set so the result stays a normal armada package.
-# The recipe comes from the armada tree, so it is cloned here rather than
-# vendored. It is pinned to ARMADA_COMMIT for the same reason gamescope is: the
-# mangohud spec and its 9 patches move with upstream, and an unpinned clone
-# would silently build a different package (or fail) whenever armada changes
-# them. Build-only packages are removed again in the same layer.
+# 8d. MangoHud built from upstream with the container metric patch.
+# MangoHud reads sysfs paths a Droidspaces container does not mount: it wants
+# devfreq `cur_freq` (Hz) for the GPU clock, but the container exposes the older
+# kgsl-3d0 layout where the clock is `clock_mhz` (MHz); /sys/class/hwmon does not
+# exist at all; and the kernel energy model is the only CPU power source on
+# Qualcomm hardware. Without the patch the overlay shows GPU clock/load/temperature
+# as 0 and has no cpu_power. The patch lives in this repo.
 #
-# ARMADA_COMMIT is (re)declared here because a Dockerfile ARG only applies from
-# its declaration line downwards; the single definition lives at the "9." pin
-# block below, which is too late for this step. Keep both values identical.
-ARG ARMADA_COMMIT=d5c23cd7831a765942559a0351859a7577afc18b
+# The source is taken from upstream rather than from armada's own MangoHud
+# package: armada ships a fork with nine patches of its own, which made this step
+# depend on the armada tree and pulled in a build that only works on bare metal.
+# MANGOHUD_COMMIT pins the exact upstream revision the patch was written against,
+# so a new upstream commit cannot silently change what this image ships. Bump it
+# together with the patch.
+ARG MANGOHUD_COMMIT=791f92016625c866323b35d01da3844531b6c237
 COPY scripts/armada/mangohud/mangohud-container-metrics.patch /tmp/mangohud-container-metrics.patch
 COPY scripts/armada/mangohud/build-mangohud-container.sh /usr/local/sbin/build-mangohud-container
 COPY scripts/armada/mangohud/mangohud-energy-model.service /usr/lib/systemd/system/mangohud-energy-model.service
 RUN set -eux; \
     chmod 0755 /usr/local/sbin/build-mangohud-container; \
     dnf -y install --setopt=install_weak_deps=False git; \
-    git clone --quiet --filter=blob:none --no-checkout \
-        https://github.com/armada-os/armada.git /tmp/armada; \
-    git -C /tmp/armada checkout --quiet "$ARMADA_COMMIT"; \
-    ARMADA_ROOT=/tmp/armada \
+    MANGOHUD_COMMIT="$MANGOHUD_COMMIT" \
     CACHE=/var/tmp/mangohud-build \
     PATCH=/tmp/mangohud-container-metrics.patch \
         /usr/local/sbin/build-mangohud-container --jobs "$(nproc)" --install; \
     rpm -q mangohud; \
     test -f /usr/bin/mangoapp; \
     systemctl enable mangohud-energy-model.service; \
-    rm -rf /tmp/armada /var/tmp/mangohud-build /tmp/mangohud-container-metrics.patch; \
+    rm -rf /var/tmp/mangohud-build /tmp/mangohud-container-metrics.patch; \
     dnf clean all
 # --- 9. Anland gamescope (built from source, then discarded) ----------------
 # ArmadaOS ships terra-gamescope, but the Anland display backend lives in the

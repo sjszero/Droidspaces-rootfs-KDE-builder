@@ -11,8 +11,8 @@ matching directory rather than at the root, and update the `COPY` lines in
 
 | File | Purpose |
 |---|---|
-| `mangohud-container-metrics.patch` | Read the kgsl-3d0 layout and the thermal-zone fallback a container actually exposes. |
-| `build-mangohud-container.sh` | Apply that patch on top of the armada set and produce a drop-in RPM. |
+| `mangohud-container-metrics.patch` | Apply on top of upstream: read the kgsl-3d0 temperature reading and add an EAS energy-model CPU power source. |
+| `build-mangohud-container.sh` | Fetch a pinned upstream commit, apply that patch, produce a drop-in RPM. |
 | `mangohud-energy-model.service` | Bring up the energy-model sysfs entries MangoHud reads at game start. |
 
 ## `anland/` — display backend and session

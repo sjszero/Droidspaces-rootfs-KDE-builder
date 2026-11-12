@@ -1,25 +1,24 @@
 #!/usr/bin/bash
-# Build the ArmadaOS MangoHud package with the Droidspaces container metric patch.
+# Build MangoHud from upstream with the Droidspaces container metric patch.
 #
 # Why this exists
 # ---------------
-# ArmadaOS ships mangohud-0.8.4-1.fc44.armada, built from ~/armada/packages/mangohud.
-# That build is tuned for bare-metal Qualcomm hardware and reads sysfs paths a
-# container does not mount:
+# MangoHud is built from upstream rather than from the armada package because the
+# armada build reads sysfs paths a container does not mount:
 #
 #   * it reads only devfreq `cur_freq` (Hz) for the GPU clock, but a Droidspaces
 #     container exposes the older kgsl-3d0 layout where the clock is
 #     `clock_mhz` (MHz), so GPU clock/load/temperature all read 0;
-#   * /sys/class/hwmon does not exist, so the msm GPU hwmon node is unreachable
-#     and every scan logs an error.
+#   * /sys/class/hwmon does not exist, so the msm GPU hwmon node is unreachable;
+#   * the kernel energy model is the only CPU power source on Qualcomm hardware,
+#     and MangoHud has no EAS backend at all.
 #
-# scripts/armada/mangohud/mangohud-container-metrics.patch fixes both. This script
-# applies it on top of the armada patch set and produces a drop-in RPM.
+# scripts/armada/mangohud/mangohud-container-metrics.patch fixes all three. This
+# script applies it to a pinned upstream commit and produces a drop-in RPM.
 #
 # What it needs
 # -------------
-#   ~/armada/packages/mangohud   spec, BASE.env and the 9 armada patches
-#   network (first run)          upstream tarball + 5 meson subprojects
+#   network (first run)          upstream tarball + meson subprojects
 #
 # Everything is cached under $CACHE so later runs work offline.
 #
@@ -44,7 +43,8 @@
 #   build-mangohud-container.sh [--version X.Y.Z] [--jobs N] [--keep]
 #                               [--dry-run] [--install]
 #
-#   --version   upstream MangoHud version; default comes from armada's BASE.env
+#   --version   version string baked into the RPM name; default comes from
+#               upstream's meson.build
 #   --jobs      parallel compile jobs; default $(nproc)
 #   --keep      keep the build tree
 #   --dry-run   resolve inputs and print the plan, build nothing
@@ -52,13 +52,15 @@
 set -euo pipefail
 
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-REPO_ROOT=$(cd -- "$HERE/../.." 2>/dev/null && pwd -P || printf '%s' "$HERE")
-ARMADA_ROOT=${ARMADA_ROOT:-$HOME/armada}
-ARMADA_PKG=$ARMADA_ROOT/packages/mangohud
 # PATCH may be overridden because the image build copies the script to
 # /usr/local/sbin while the patch lands in /tmp.
 PATCH=${PATCH:-$HERE/mangohud-container-metrics.patch}
 CACHE=${CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mangohud-container-build}
+# Pinned upstream commit. Bump it deliberately: the container patch is written
+# against this exact tree, and the build below refuses to start if the patch does
+# not apply cleanly.
+MANGOHUD_COMMIT=${MANGOHUD_COMMIT:-791f92016625c866323b35d01da3844531b6c237}
+MANGOHUD_REPOSITORY=${MANGOHUD_REPOSITORY:-https://github.com/flightlessmango/MangoHud.git}
 JOBS=${JOBS:-$(nproc)}
 VERSION=${VERSION:-}
 KEEP=0
@@ -83,31 +85,12 @@ done
 [[ $JOBS =~ ^[1-9][0-9]*$ ]] || die "invalid --jobs: $JOBS"
 
 # ---- inputs ----------------------------------------------------------------
-[[ -d $ARMADA_PKG ]] || die "armada mangohud recipe not found: $ARMADA_PKG"
-[[ -f $ARMADA_PKG/mangohud.spec ]] || die "missing spec: $ARMADA_PKG/mangohud.spec"
 [[ -f $PATCH ]] || die "missing container patch: $PATCH"
 
-if [[ -z $VERSION ]]; then
-    # shellcheck disable=SC1091
-    VERSION=$( . "$ARMADA_PKG/BASE.env" && printf '%s' "${VERSION:-}" )
-    [[ -n $VERSION ]] || die "cannot determine version from $ARMADA_PKG/BASE.env"
-fi
-
-mapfile -t ARMADA_PATCHES < <(find "$ARMADA_PKG/patches" -maxdepth 1 -type f -name '*.patch' | sort)
-(( ${#ARMADA_PATCHES[@]} )) || die "no armada patches found in $ARMADA_PKG/patches"
-
-# ARMADA_MARCH is what makes the armada package Armada-specific. Read it from
-# the recipe's toolchain.env instead of hardcoding, so a flag change upstream
-# is picked up here too.
-MARCH=""
-if [[ -f $ARMADA_ROOT/packages/toolchain.env ]]; then
-    MARCH=$(sed -n 's/^ARMADA_MARCH="\(.*\)"$/\1/p' "$ARMADA_ROOT/packages/toolchain.env")
-fi
-
-log "version       : $VERSION"
-log "armada recipe : $ARMADA_PKG (${#ARMADA_PATCHES[@]} patches)"
+log "repository    : $MANGOHUD_REPOSITORY"
+log "commit        : $MANGOHUD_COMMIT"
+log "version       : ${VERSION:-<from meson.build>}"
 log "container     : $(basename "$PATCH")"
-log "march         : ${MARCH:-<none>}"
 log "cache         : $CACHE"
 
 if (( DRY_RUN )); then
@@ -193,7 +176,7 @@ prepare_deps() {
     # imgui's meson.build asks for dependency('gl') and needs gl.pc plus
     # /usr/include/GL/gl.h. Both come from libglvnd-devel.
     for pc in vulkan appstream dbus-1 yaml-cpp nlohmann_json spdlog glslang \
-              wayland-client x11 xkbcommon gl; do
+              wayland-client x11 xkbcommon gl egl; do
         pkg-config --exists "$pc" 2>/dev/null || missing+=("pkgconfig:$pc")
     done
     if ! find "$(gcc -print-file-name=libstdc++.a 2>/dev/null)" -maxdepth 0 -type f >/dev/null 2>&1; then
@@ -211,7 +194,7 @@ prepare_deps() {
             libdrm-devel wayland-devel wayland-protocols-devel python3-mako \
             libX11-devel libXrandr-devel libXcursor-devel libcurl-devel \
             libxkbcommon-devel libxkbcommon-x11-devel \
-            vulkan-loader-devel libappstream-glib libglvnd-devel >/dev/null 2>&1 ||
+            vulkan-loader-devel libappstream-glib libglvnd-devel mesa-libEGL-devel >/dev/null 2>&1 ||
             die "dependency installation failed"
     fi
 
@@ -222,33 +205,42 @@ prepare_deps
 
 # ---- fetch sources ---------------------------------------------------------
 mkdir -p "$CACHE"
-TARBALL=$CACHE/mangohud-$VERSION.tar.gz
-if [[ ! -s $TARBALL ]]; then
-    log "downloading MangoHud v$VERSION"
-    url="https://github.com/flightlessmango/MangoHud/archive/v$VERSION/mangohud-$VERSION.tar.gz"
-    ok=0
-    for attempt in 1 2 3 4 5; do
-        if timeout 200 curl -sSL -o "$TARBALL" "$url" && [[ -s $TARBALL ]]; then ok=1; break; fi
-        log "download attempt $attempt failed, retrying"
-        sleep $(( attempt * 3 ))
-    done
-    (( ok )) || { rm -f "$TARBALL"; die "cannot download $url"; }
-else
-    log "using cached tarball $TARBALL"
+SRC=$CACHE/src
+
+# A shallow clone at the pinned commit. Upstream tarballs are named after the
+# release tag, but the pin is a commit past v0.8.4, so the repository is the only
+# source that matches MANGOHUD_COMMIT exactly.
+if [[ ! -d $SRC/.git ]]; then
+    rm -rf "$SRC"
+    log "cloning MangoHud"
+    git clone --quiet --filter=blob:none --no-checkout \
+        "$MANGOHUD_REPOSITORY" "$SRC" || die "cannot clone $MANGOHUD_REPOSITORY"
+fi
+if ! git -C "$SRC" cat-file -e "$MANGOHUD_COMMIT^{commit}" 2>/dev/null; then
+    log "fetching pinned commit"
+    git -C "$SRC" fetch --quiet origin "$MANGOHUD_COMMIT" ||
+        git -C "$SRC" fetch --quiet origin || die "cannot fetch from $MANGOHUD_REPOSITORY"
+fi
+git -C "$SRC" checkout --quiet --force "$MANGOHUD_COMMIT" || die "cannot check out $MANGOHUD_COMMIT"
+git -C "$SRC" clean -xdfq
+log "checkout $(git -C "$SRC" rev-parse --short HEAD)"
+
+# Only read the version out of the source when the caller did not pin one.
+if [[ -z $VERSION ]]; then
+    VERSION=$(sed -n "s/^  version : 'v\{0,1\}\([^']*\)',/\1/p" "$SRC/meson.build" | head -1)
+    [[ -n $VERSION ]] || die "cannot determine version from $SRC/meson.build"
 fi
 
-# The spec sets %global __meson_wrap_mode default, so meson fetches the five
-# wrap subprojects itself during %build. Do that download here instead: a fresh
-# container has no warm cache, and a failure inside meson names no URL. Every
-# file is also hash-checked against the wrap file, so a truncated download stops
-# the build now instead of as "Incorrect hash for source" minutes later.
+# The spec sets %global __meson_wrap_mode default, so meson fetches the wraps
+# itself during %build. Do that download here instead: a fresh container has no
+# warm cache, and a failure inside meson names no URL. Every file is also
+# hash-checked against the wrap file, so a truncated download stops the build now
+# instead of as "Incorrect hash for source" minutes later.
 #
 # The files are then handed to meson through MESON_PACKAGE_CACHE_DIR. That is
 # the variable meson 1.x actually reads
 # (mesonbuild/wrap/wrap.py: os.environ.get('MESON_PACKAGE_CACHE_DIR')), and it
-# is exported into rpmbuild below. Without it meson only looks at
-# <src>/subprojects/packagecache, which %autosetup recreates empty from the
-# tarball, and there is no per-user global cache to fall back on.
+# is exported into rpmbuild below.
 SUBDIR=$CACHE/subprojects
 mkdir -p "$SUBDIR"
 
@@ -279,8 +271,7 @@ fetch() {   # fetch <filename> <expected-sha256> <url> [fallback-url...]
     die "cannot download subproject $name (tried: $*)"
 }
 
-# source and patch files both live in the packagecache; hashes are copied from
-# MangoHud 0.8.4's subprojects/*.wrap.
+# hashes are copied from the pinned commit's subprojects/*.wrap
 fetch imgui-1.91.6.tar.gz \
     c5fbc5dcab1d46064001c3b84d7a88812985cde7e0e9ced03f5677bec1ba502a \
     https://github.com/ocornut/imgui/archive/refs/tags/v1.91.6.tar.gz
@@ -310,51 +301,117 @@ TOP=$CACHE/rpmbuild
 rm -rf "$TOP"
 mkdir -p "$TOP"/{SOURCES,SPECS,BUILD,BUILDROOT,RPMS,SRPMS}
 
-cp "$ARMADA_PKG/mangohud.spec" "$TOP/SPECS/"
-cp "${ARMADA_PATCHES[@]}" "$TOP/SOURCES/"
+# The source is shipped as a git archive so %autosetup has a stable top-level
+# directory to strip. `git archive` also drops .git, which keeps rpmbuild from
+# picking up a stale vcs tag.
+TARBALL=$CACHE/mangohud-$VERSION.tar.gz
+( cd "$SRC" && git archive --format=tar.gz --prefix="MangoHud-$VERSION/" \
+    -o "$TARBALL" "$MANGOHUD_COMMIT" ) || die "cannot create source tarball"
 cp "$TARBALL" "$TOP/SOURCES/"
-cp "$PATCH" "$TOP/SOURCES/0010-container-metrics.patch"
+cp "$PATCH" "$TOP/SOURCES/0001-container-metrics.patch"
 
+# A minimal spec. The armada spec is not reused because it carries nine patches
+# written against the armada fork; this package is plain upstream plus the
+# container patch.
 SPEC=$TOP/SPECS/mangohud.spec
+cat >"$SPEC" <<SPEC_EOF
+%global appname MangoHud
+%global forgeurl https://github.com/flightlessmango/MangoHud
+# Let meson fetch subprojects from the wraps at build time; the files themselves
+# are pre-seeded through MESON_PACKAGE_CACHE_DIR.
+%global __meson_wrap_mode default
+%global source_date_epoch_from_changelog 0
+%bcond_with tests
+Name:           mangohud
+Version:        $VERSION
+Release:        1%{?dist}.container
+Summary:        Vulkan and OpenGL overlay for monitoring FPS, temperatures, CPU/GPU load
+License:        MIT
+URL:            %{forgeurl}
+Source0:        %{name}-%{version}.tar.gz
+Patch1:         0001-container-metrics.patch
+BuildRequires:  vulkan-headers
+BuildRequires:  appstream
+BuildRequires:  dbus-devel
+BuildRequires:  gcc-c++
+BuildRequires:  git-core
+BuildRequires:  libappstream-glib
+BuildRequires:  libstdc++-static
+BuildRequires:  meson >= 1.7.0
+BuildRequires:  python3-mako
+BuildRequires:  pkgconfig(dri)
+BuildRequires:  pkgconfig(glfw3)
+BuildRequires:  pkgconfig(glslang)
+BuildRequires:  pkgconfig(nlohmann_json)
+BuildRequires:  pkgconfig(spdlog)
+BuildRequires:  pkgconfig(wayland-client)
+BuildRequires:  pkgconfig(x11)
+BuildRequires:  pkgconfig(xkbcommon)
+Requires:       hicolor-icon-theme
+Requires:       vulkan-loader%{?_isa}
 
-# The armada build.sh does these two edits; replicate them so the result is the
-# same package plus our patch, not a subtly different build.
-sed -i "s/^Version:.*/Version:        $VERSION/" "$SPEC"
-if [[ -n $MARCH ]]; then
-    sed -i "/^%build$/i %global build_cflags %{build_cflags} $MARCH" "$SPEC"
-    sed -i "/^%build$/i %global build_cxxflags %{build_cxxflags} $MARCH" "$SPEC"
-fi
+%description
+A Vulkan and OpenGL overlay for monitoring FPS, temperatures, CPU/GPU load and
+more. Built from upstream with the Droidspaces container metric patch.
 
-# Declare the container patch after the last armada PatchN line so %autosetup
-# applies it in order.
-last_patch=$(grep -n '^Patch[0-9]*:' "$SPEC" | tail -1 | cut -d: -f1)
-[[ -n $last_patch ]] || die "spec has no Patch lines to anchor the container patch"
-sed -i "${last_patch}a Patch10:        0010-container-metrics.patch" "$SPEC"
+%prep
+%autosetup -n %{appname}-%{version} -p1
 
-# Verify the patch still applies to the patched source before spending minutes
-# on a compile. --fuzz=0 makes drift a hard failure instead of a silent offset.
+%build
+%meson \\
+    -Dmangoapp=true \\
+    -Dmangohudctl=true \\
+    -Dinclude_doc=true \\
+    -Duse_system_spdlog=enabled \\
+    -Dwith_wayland=enabled \\
+    -Dwith_xnvctrl=disabled \\
+    -Dtests=disabled \\
+    -Dwith_fex=false \\
+    -Dwith_mangohud_next=false \\
+    %{nil}
+%meson_build
+
+%install
+%meson_install
+# mangoplot ships a `#!/usr/bin/env python` shebang, which rpm rejects as
+# ambiguous. Upstream's own spec does the same rewrite.
+sed -i "s@#!/usr/bin/env python@#!/usr/bin/python3@" \
+    %{buildroot}%{_bindir}/mangoplot
+rm -f %{buildroot}%{_libdir}/libimgui.a
+
+%files
+%license LICENSE
+%doc README.md
+%{_bindir}/mangoapp
+%{_bindir}/mangohud
+%{_bindir}/mangohudctl
+%{_bindir}/mangoplot
+%{_datadir}/icons/hicolor/scalable/*/*.svg
+%{_datadir}/vulkan/implicit_layer.d/*Mango*.json
+%{_docdir}/%{name}/%{appname}.conf.example
+%{_docdir}/%{name}/presets.conf.example
+%{_libdir}/%{name}/
+%{_mandir}/man1/%{name}.1*
+%{_mandir}/man1/mangoapp.1*
+%{_metainfodir}/*.metainfo.xml
+
+%changelog
+SPEC_EOF
+
+# Verify the patch still applies to the pinned source before spending minutes on
+# a compile. --fuzz=0 makes drift a hard failure instead of a silent offset.
 log "verifying the container patch applies cleanly"
 VERIFY=$CACHE/verify
 rm -rf "$VERIFY"; mkdir -p "$VERIFY"
 tar xf "$TARBALL" -C "$VERIFY"
 ( cd "$VERIFY/MangoHud-$VERSION" || exit 1
-  for p in "${ARMADA_PATCHES[@]}"; do
-      patch -s -p1 --batch --forward --fuzz=0 <"$p" || exit 1
-  done
   patch -p1 --batch --forward --fuzz=0 <"$PATCH" >/dev/null || exit 1
-) || die "patch series does not apply cleanly (armada patches or container patch drifted)"
-
-# Hand the downloads to meson. meson only looks at $MESON_PACKAGE_CACHE_DIR or
-# <src>/subprojects/packagecache; it has no per-user global cache, and
-# %autosetup unpacks the tarball fresh into %{_builddir} with an empty
-# packagecache, so the only way in is the environment variable. Verified against
-# mesonbuild/wrap/wrap.py in meson 1.11.2:
-#     os.environ.get('MESON_PACKAGE_CACHE_DIR') or <src>/subprojects/packagecache
-# rpmbuild passes the environment through to %build (checked with a scratch
-# spec), so export it for the rpmbuild invocation below.
-export MESON_PACKAGE_CACHE_DIR=$SUBDIR
-PKGCACHE=$MESON_PACKAGE_CACHE_DIR
+) || die "container patch does not apply to $MANGOHUD_COMMIT"
 rm -rf "$VERIFY"
+
+# Hand the downloads to meson. rpmbuild passes the environment through to %build,
+# so export it for the invocation below.
+export MESON_PACKAGE_CACHE_DIR=$SUBDIR
 
 # ---- build -----------------------------------------------------------------
 # --nodeps: see header note 2. debug_package is disabled because the generated
@@ -388,5 +445,3 @@ fi
 if (( KEEP )); then
     log "build tree kept at $TOP"
 fi
-
-printf '%s\n' "$RPM"
