@@ -2112,9 +2112,13 @@ if [ "$(rpm --eval '%{evr}')" = '%{evr}' ]; then
     exit 1
 fi
 
-# Pick up newer backend changes before rebuilding.
+# Pick up newer backend changes before rebuilding, but never discard local work:
+# the ported gamescope commit lives in this tree until it is pushed upstream, and a
+# hard reset would silently drop it (and with it the gamescope base pin).
 git -C "$ANLAND" fetch --quiet origin
-git -C "$ANLAND" reset --quiet --hard "origin/${ANLAND_BRANCH:-legacy}"
+git -C "$ANLAND" merge --quiet --ff-only "origin/${ANLAND_BRANCH:-legacy}" ||
+    echo "anland-rebuild-gamescope: origin/${ANLAND_BRANCH:-legacy} is not a fast-forward;" \
+         "keeping the local anland tree" >&2
 
 git clone --quiet --depth 1 --branch "$GAMESCOPE_TAG" \
     https://github.com/OpenGamingCollective/gamescope "$CACHE/source"

@@ -881,6 +881,11 @@ anland 自带的这份，按 `--fuzz=0` 整条应用。第一版重基踩到一�
 代理），旧源保留为 `origin-sjszero`；移植提交目前只存在这棵树里，推到 `SuperTurtleDev/anland`
 即可（推上去之后重建才会把它当成远端内容）。
 
+`anland-rebuild-gamescope` 更新 anland 的方式也随之从硬重置改成 `git merge --ff-only`：远端前进
+而本地带着移植提交时只报一行警告并保留本地树（硬重置会把这个提交连同 gamescope 基座 pin 一起
+冲掉）。三种语义都实测过：已是最新时 `rc=0`、可快进时 HEAD 前进、分叉时 `rc≠0` 且本地提交与
+工作区完好。
+
 ### 遗留
 - 运行中的 Steam 会话仍是旧二进制，新版本在下次会话启动时生效；本次没有重启会话。
 - 有意新增 `mesa-libgbm-devel`（钉 `26.2.6`）与系统级 git 代理、`safe.directory` 配置。
