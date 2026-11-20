@@ -346,7 +346,7 @@ build.sh: Unexpected Gamescope revision
 
 仓库修复已落在 `ArmadaOS.Dockerfile`：统一为 Gamescope `3.17.0-ogc1` / `4246b87f...`、Armada `f0a50c0a...`；Dockerfile 的补丁数断言改为 32；镜像内 `anland-rebuild-gamescope` 默认 Gamescope tag 和 Armada commit 同步更新。没有放宽 Anland 构建脚本的版本/补丁断言，也没有修改旧容器运行中的图形服务。
 
-静态验证：仓库初始工作区干净；配置修复后 `git diff --check` 通过。曾误启动一次本地 rootful Podman 构建验证，30 分钟后仍停在拉取 `ghcr.io/armada-os/armada:testing` 基础镜像，未进入 Dockerfile 步骤；随后按用户要求立即中止，不再本地编译容器。rootless Podman 的 `newuidmap` 受限，默认 rootful 存储位于 F2FS 且不支持 overlay；没有形成可用的本地镜像。后续只在用户指定的新编译环境中验证。
+静态验证：仓库初始工作区干净；配置修复后 `git diff --check` 通过。曾误启动一次本地 rootful Podman 构建验证，30 分钟后仍停在拉取 `ghcr.io/armada-os/armada:testing` 基础镜像（当时的上游；2026-11-20 起已改为 `armadaos-freedom`），未进入 Dockerfile 步骤；随后按用户要求立即中止，不再本地编译容器。rootless Podman 的 `newuidmap` 受限，默认 rootful 存储位于 F2FS 且不支持 overlay；没有形成可用的本地镜像。后续只在用户指定的新编译环境中验证。
 
 未验证：Dockerfile 实际构建、Gamescope RPM 产出、导出 RootFS、导入后的桌面/游戏会话；未提交或推送 Git。
 ## ArmadaOS 镜像构建失败：portal 排除断言（2026-10-31）
@@ -486,7 +486,7 @@ GPU 功耗**无法获取**：`energy_model` 只含 cpu0/2/5/7，GPU OPP 的 `u_w
 
 冷启动场景已实测：手动 `chmod 700` 模拟重启后权限状态 → 用户读不到 → `systemctl restart` → 恢复可读 → MangoHud 重新识别出 4 个域。
 ### 构建脚本：`scripts/armada/mangohud/build-mangohud-container.sh`
-从上游 `MANGOHUD_COMMIT` 取源码，套本仓库容器补丁后产出 RPM。脚本不再依赖 `~/armada`：`MANGOHUD_COMMIT` 在 Dockerfile 与本脚本中各有一份默认值，两者必须一致。
+从上游 `MANGOHUD_COMMIT` 取源码，套本仓库容器补丁后产出 RPM。脚本不再依赖上游源码树（`~/armada`，现为 `~/armadaos-freedom`）：`MANGOHUD_COMMIT` 在 Dockerfile 与本脚本中各有一份默认值，两者必须一致。
 ```bash
 scripts/armada/mangohud/build-mangohud-container.sh              # 只构建
 scripts/armada/mangohud/build-mangohud-container.sh --install    # 构建并安装
@@ -760,3 +760,36 @@ scripts/armada/box64/rpm/README.md         # 装到 /usr/share/doc/box64-armada/
 2. **x86-64 库不能进依赖生成**。rpm 6.0.2 里 `__provides_exclude_from` 对 ELF 生成器无效；正确的开关是 `__elf_exclude_path`（且要保留 `^/lib/modules/.*` 那条默认值）。不排除的话，这个 aarch64 包会宣告 `Provides: libstdc++.so.6()(64bit)`（可能被拿去满足别的包的依赖，塞进去的却是 x86-64 文件）并凭空 `Requires: libssl.so.3`（那是包内 x86-64 libcurl 的依赖）。已用一个一次性小包验证开关有效（控制组有 `libcurl.so.4()(64bit)`，加排除后为空）。
 
 构建注意：本机 `nproc` 够，但 **CPU 频率会被系统收回**（实测从满档掉到 1.02 GHz），box64 的 LTO 链接在低频下单步就要十几分钟；一次干净构建满频约 6 分钟、1 GHz 下 20 分钟以上。构建脚本支持 `BOX64_SOURCE_TREE=…` 用本地源码树跳过 codeload 下载（本机到 GitHub 只有 ~18 KB/s）。
+
+## 2026-11-20 容器构建上游从 armada 改为 armadaos-freedom
+
+`armada-os/armada` 已改名为 `ArmadaOS-Freedom/armadaos-freedom`，容器构建随之切换。
+之后 `~/armadaos-freedom` 就是上游参照，`~/armada` 只作为历史仓库保留。
+
+改动（`ArmadaOS.Dockerfile`）：
+
+| 位置 | 旧 | 新 |
+| --- | --- | --- |
+| 基础镜像 | `ghcr.io/armada-os/armada:testing` | `ghcr.io/armadaos-freedom/armadaos-freedom:testing` |
+| gamescope 补丁源 | `github.com/armada-os/armada.git` @ `d5c23cd` | `github.com/ArmadaOS-Freedom/armadaos-freedom.git` @ `be6fc783` |
+| 补丁数量断言（gamescope 步骤） | `= 31` | `= 40` |
+| `anland-rebuild-gamescope` | 硬编码旧 URL 与 `d5c23cd` | 统一走 `ARMADA_REPOSITORY` / `ARMADA_COMMIT` 变量 |
+
+关键点：`anland` 的 `producers/gamescope/ArmadaOS_v5/build.sh` 里有一条写死的
+`assert len(patches)==31`（对应 armada d5c23cd 的旧序列），而它同时决定生成 RPM spec 的
+补丁清单。新上游序列是 40 个（`[0-9][0-9][0-9][0-9]-*.patch` 实测计数），直接换会在这一步
+assert 失败。现在的做法是在 anland 克隆后用一段 python 把那个字面量改成“按钉住的
+ARMADA_ROOT 实际文件数”，断言本身保留：它能抓住上游悄悄改变序列长度，anland 脚本形状
+变化时会明确报错而不是静默通过。gamescope 构建步骤与镜像内
+`/usr/local/bin/anland-rebuild-gamescope` 两处都做了同样处理。
+
+验证：重定向片段在本机对真实 anland `build.sh` 跑过（31 → 40，`bash -n` 通过）；
+`ArmadaOS.Dockerfile` 里已无 `armada-os/armada` 的功能性引用；新基础镜像 tag 已核实存在
+（`ghcr.io/armadaos-freedom/armadaos-freedom:testing` 的 OCI index 可匿名拉取，HTTP 200；
+旧 `armada-os/armada:testing` 同样可用，切换不会因镜像不存在而在 `FROM` 就失败）。
+
+仍未验证：**没有重建镜像**。gamescope 仍钉在 `3.17.0-ogc1`（`4246b87f`，anland 侧同样断言
+该 revision），armadaos-freedom 的 40 个补丁是否仍基于该 tag 未实测——首次重建若补丁打不上，
+会停在 gamescope 步骤，届时需要同步升 `GAMESCOPE_TAG`/`GAMESCOPE_COMMIT` 或挑一组与
+`3.17.0-ogc1` 兼容的补丁。`anland` 的 `ArmadaOS_v5` 目录名与预设路径未变，但若上游改了
+`build.sh` 的断言写法，重定向片段会显式报错（期望恰好一条 `assert len(patches)==N`）。

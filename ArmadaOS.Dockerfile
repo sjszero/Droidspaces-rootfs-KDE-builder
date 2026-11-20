@@ -21,7 +21,10 @@
 # Armada Steam session (default, matches `kde`/`none` inputs) and keeping the
 # KDE Plasma desktop reachable for a docked/desktop experience.
 
-ARG ARMADA_BASE_IMAGE=ghcr.io/armada-os/armada:testing
+# The base bootc image published by the ArmadaOS upstream. The project moved
+# from armada-os/armada to ArmadaOS-Freedom/armadaos-freedom; the published
+# images follow the new owner and keep the `testing` tag.
+ARG ARMADA_BASE_IMAGE=ghcr.io/armadaos-freedom/armadaos-freedom:testing
 
 FROM ${ARMADA_BASE_IMAGE} AS customizer
 
@@ -1785,17 +1788,20 @@ EOF_RUN
 # build.sh refuses to run as root and needs four pinned inputs:
 #
 #   anland            github.com/sjszero/anland (legacy)       -> kept
-#   armada patches    github.com/armada-os/armada  @ pinned     -> deleted
+#   armada patches    github.com/ArmadaOS-Freedom/armadaos-freedom @ pinned -> deleted
 #   Terra RPM recipe  github.com/terrapkg/packages @ pinned     -> deleted
 #   gamescope source  OpenGamingCollective/gamescope @ tag      -> deleted
 #   xwayland SDK      xwayland.pc, generated below              -> deleted
 #
 # Pin rationale: gamescope.patch and the anland overlay are written against
-# gamescope 3.17.0-ogc1 and the Armada patch series at ARMADA_COMMIT. build.sh
-# asserts the exact Armada patch count, so armada must never be taken from HEAD:
-# the count moves whenever upstream adds or drops a patch (0027 was dropped in
-# 4d6ea8b, taking the series 32 -> 31). When bumping ARMADA_COMMIT, update the
-# count assertion below and the one in anland's build.sh together.
+# gamescope 3.17.0-ogc1 and the Armada patch series at ARMADA_COMMIT. The series
+# moves whenever upstream adds or drops a patch and anland derives the RPM spec
+# from that same file list, so armada must never be taken from HEAD.
+#
+# The upstream is armadaos-freedom, the renamed armada-os/armada. At be6fc783
+# its series carries 40 patches where armada d5c23cd carried 31, so both this
+# file's assertion and the literal anland hardcodes are driven by the actual
+# file list rather than by a number somebody has to remember to bump.
 
 ARG ANLAND_REPOSITORY=https://github.com/sjszero/anland.git
 ARG ANLAND_BRANCH=legacy
@@ -1806,12 +1812,12 @@ ARG GAMESCOPE_TAG=3.17.0-ogc1
 ARG GAMESCOPE_COMMIT=4246b87f49d6116d5f863131dcc401fc52840644
 ARG ANLAND_JOBS=4
 
-# Armada pins used by the gamescope build below (and, for ARMADA_COMMIT, by the
-# MangoHud step above, which re-declares the same value because ARGs only apply
-# from their declaration line downwards). Keep the two ARMADA_COMMIT values and
-# the patch-count assertion below in sync with anland's build.sh.
-ARG ARMADA_REPOSITORY=https://github.com/armada-os/armada.git
-ARG ARMADA_COMMIT=d5c23cd7831a765942559a0351859a7577afc18b
+# Armada pins used by the gamescope build below and by the anland-rebuild-gamescope
+# helper further down, which runs outside this build stage and therefore
+# re-declares the same two values. Keep both ARMADA_COMMIT values and the
+# patch-count assertion below in sync with anland's build.sh.
+ARG ARMADA_REPOSITORY=https://github.com/ArmadaOS-Freedom/armadaos-freedom.git
+ARG ARMADA_COMMIT=be6fc7834012c54a1ae7b8ae8dfba39196064458
 
 # Drop privileges without opening a PAM session.
 # runuser opens one, and pam_limits then fails with
@@ -1894,8 +1900,10 @@ git clone --quiet --filter=blob:none --no-checkout \
     "$ARMADA_REPOSITORY" "$BUILD_ROOT/armada"
 git -C "$BUILD_ROOT/armada" checkout --quiet "$ARMADA_COMMIT"
 ARMADA_ROOT="$BUILD_ROOT/armada"
+# 40 at armadaos-freedom be6fc783, against 31 at the armada d5c23cd this image
+# used before; anland's own literal is retargeted right after its clone below.
 test "$(find "$ARMADA_ROOT/packages/gamescope/patches" \
-    -name '[0-9][0-9][0-9][0-9]-*.patch' | wc -l)" = 31
+    -name '[0-9][0-9][0-9][0-9]-*.patch' | wc -l)" = 40
 
 # Terra/OGC RPM recipe at the pinned commit (build.sh adapts it in place).
 git clone --quiet --filter=blob:none --no-checkout \
@@ -1939,6 +1947,24 @@ PC
 # anland tree (kept)
 rm -rf "$ANLAND"
 git clone --quiet --branch "$ANLAND_BRANCH" "$ANLAND_REPOSITORY" "$ANLAND"
+# anland's build.sh pins the size of the Armada gamescope patch series it was
+# written against (assert len(patches)==31, the count at armada d5c23cd) and
+# builds the RPM spec from that same list. The upstream is armadaos-freedom now,
+# whose series is longer, so the literal is rewritten from what the pinned
+# ARMADA_ROOT actually carries. The assertion itself is kept - it is what catches
+# a series that silently changed size - and this fails loudly if anland's script
+# stops looking the way it does today.
+python3 - "$ANLAND/producers/gamescope/ArmadaOS_v5/build.sh" "$ARMADA_ROOT" <<'PY_ARMADA'
+import pathlib, re, sys
+script, armada = map(pathlib.Path, sys.argv[1:3])
+count = len(list((armada / 'packages/gamescope/patches').glob('[0-9][0-9][0-9][0-9]-*.patch')))
+text = script.read_text()
+new, n = re.subn(r'assert len\(patches\)==\d+', f'assert len(patches)=={count}', text)
+if n != 1:
+    sys.exit(f'expected exactly one patch-count assert in {script}, found {n}')
+script.write_text(new)
+print(f'anland build.sh: armada patch count assert retargeted to {count}')
+PY_ARMADA
 
 # build
 # build.sh requires an ordinary aarch64 user, so only this step drops root.
@@ -2011,7 +2037,8 @@ set -euo pipefail
 ANLAND=/usr/local/src/anland
 BUILD_ROOT=/var/tmp/anland-gamescope-build
 CACHE="$BUILD_ROOT/cache"
-ARMADA_COMMIT=d5c23cd7831a765942559a0351859a7577afc18b
+ARMADA_REPOSITORY=${ARMADA_REPOSITORY:-https://github.com/ArmadaOS-Freedom/armadaos-freedom.git}
+ARMADA_COMMIT=be6fc7834012c54a1ae7b8ae8dfba39196064458
 TERRA_COMMIT=23ec8c9aeaad28179925232fe7564f80da06d4ab
 GAMESCOPE_TAG=${GAMESCOPE_TAG:-3.17.0-ogc1}
 JOBS=${JOBS:-$(nproc)}
@@ -2061,7 +2088,7 @@ git clone --quiet --depth 1 --branch "$GAMESCOPE_TAG" \
 git -C "$CACHE/source" submodule --quiet update --init --depth 1 --recursive
 
 git clone --quiet --filter=blob:none --no-checkout \
-    https://github.com/armada-os/armada.git "$BUILD_ROOT/armada"
+    "$ARMADA_REPOSITORY" "$BUILD_ROOT/armada"
 git -C "$BUILD_ROOT/armada" checkout --quiet "$ARMADA_COMMIT"
 
 git clone --quiet --filter=blob:none --no-checkout \
@@ -2098,6 +2125,24 @@ URL: https://gitlab.freedesktop.org/xorg/xserver/
 Version: 24.1.14
 PC
 
+# anland's build.sh pins the size of the Armada gamescope patch series it was
+# written against (assert len(patches)==31, the count at armada d5c23cd) and
+# builds the RPM spec from that same list. The upstream is armadaos-freedom now,
+# whose series is longer, so the literal is rewritten from what the pinned
+# ARMADA_ROOT actually carries. The assertion itself is kept - it is what catches
+# a series that silently changed size - and this fails loudly if anland's script
+# stops looking the way it does today.
+python3 - "$ANLAND/producers/gamescope/ArmadaOS_v5/build.sh" "$ARMADA_ROOT" <<'PY_ARMADA'
+import pathlib, re, sys
+script, armada = map(pathlib.Path, sys.argv[1:3])
+count = len(list((armada / 'packages/gamescope/patches').glob('[0-9][0-9][0-9][0-9]-*.patch')))
+text = script.read_text()
+new, n = re.subn(r'assert len\(patches\)==\d+', f'assert len(patches)=={count}', text)
+if n != 1:
+    sys.exit(f'expected exactly one patch-count assert in {script}, found {n}')
+script.write_text(new)
+print(f'anland build.sh: armada patch count assert retargeted to {count}')
+PY_ARMADA
 BUILD_USER=${BUILD_USER:-$(getent passwd 1000 | cut -d: -f1)}
 [[ -n $BUILD_USER ]] || { echo 'anland-rebuild-gamescope: no uid 1000 user' >&2; exit 1; }
 BUILD_HOME=$(getent passwd "$BUILD_USER" | cut -d: -f6)
