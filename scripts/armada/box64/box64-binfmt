@@ -1,0 +1,41 @@
+#!/usr/bin/bash
+# Register box64 as the kernel's x86-64 interpreter.
+#
+# Why this exists: systemd-binfmt only starts when /proc/sys/fs/binfmt_misc is
+# already a mountpoint, and nothing mounts it at boot in this container, so the
+# vendor binfmt.d entries silently never get registered. Without this unit an
+# x86-64 binary fails with ENOEXEC ("cannot execute binary file") and Steam
+# reports the game process dying a second after launch.
+set -u
+
+MNT=/proc/sys/fs/binfmt_misc
+BOX64=/usr/bin/box64
+
+if [[ ! -x $BOX64 ]]; then
+    echo "box64 is not installed" >&2
+    exit 1
+fi
+
+if ! mountpoint -q "$MNT"; then
+    mount -t binfmt_misc binfmt_misc "$MNT" || exit 1
+fi
+
+# binfmt_misc resolves several handlers matching the same ELF against each other
+# in reverse registration order, so the entry registered last wins. FEX also
+# claims x86-64 through its own binfmt.d file; dropping and re-adding box64 makes
+# it deterministic regardless of what ran earlier in the boot sequence.
+if [[ -e $MNT/box64 ]]; then
+    echo -1 >"$MNT/box64" 2>/dev/null || true
+fi
+
+# magic/mask: ELF, 64-bit, little endian, e_machine = 0x3e (x86-64).
+# The kernel itself interprets the \x escapes, so they are written literally.
+printf '%s\n' ':box64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/box64:' \
+    >"$MNT/register"
+
+if [[ ! -e $MNT/box64 ]]; then
+    echo "failed to register the box64 binfmt handler" >&2
+    exit 1
+fi
+
+exit 0

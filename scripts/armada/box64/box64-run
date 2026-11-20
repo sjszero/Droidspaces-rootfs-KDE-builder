@@ -1,0 +1,99 @@
+#!/usr/bin/bash
+# Steam compatibility tool that runs x86-64 Linux games through box64.
+#
+# Steam invokes: box64-run <verb> -- <executable> [arguments...]
+#
+# The manifest deliberately declares no require_tool_appid: box64 emulates the
+# x86-64 user space itself and forwards libc/Mesa/Vulkan/X11 to the host's
+# aarch64 libraries, which a Steam Linux Runtime container would hide behind its
+# own /usr. So the tool runs directly in the host (the ArmadaOS container).
+set -uo pipefail
+# Native (aarch64) Vulkan layers cannot be bridged into an emulated x86-64 game.
+# With any layer in the chain, box64's vkGetInstanceProcAddr thunk ends up calling
+# a NULL function pointer and the game dies with SIGSEGV inside SDL2's
+# X11_GL_GetVisual (Stardew Valley: 47-138 s in, right when Mesa zink builds its
+# GL context). Dropping the whole layer chain is what keeps zink alive.
+export VK_LOADER_LAYERS_DISABLE="${VK_LOADER_LAYERS_DISABLE:-~all~}"
+
+log() { printf 'box64-run: %s\n' "$*" >&2; }
+
+verb="${1:-}"
+if [[ $# -gt 0 ]]; then shift; fi
+[[ "${1:-}" == "--" ]] && shift
+
+if [[ $# -eq 0 ]]; then
+    log "no executable given (verb '${verb}')"
+    exit 2
+fi
+
+# Steam's own client libraries, overlay and the games' arm64 runtime are all
+# aarch64. Inherited by an x86-64 process they make the loader resolve the wrong
+# architecture (and box64 log a wall of misses), so those entries are dropped.
+drop_foreign() {
+    local list="$1" sep="$2" entry out=""
+    local IFS="${sep}"
+    for entry in ${list}; do
+        [[ -z "${entry}" ]] && continue
+        case "${entry}" in
+            *steamrtarm64*|*linuxarm64*|*aarch64*|*steam-runtime-steamrt*|*gameoverlayrenderer*) continue ;;
+        esac
+        out="${out}${out:+${sep}}${entry}"
+    done
+    printf '%s' "${out}"
+}
+
+LD_LIBRARY_PATH="$(drop_foreign "${LD_LIBRARY_PATH-}" ':')"
+LD_PRELOAD="$(drop_foreign "${LD_PRELOAD-}" ' ')"
+export LD_LIBRARY_PATH LD_PRELOAD
+[[ -n "${LD_LIBRARY_PATH}" ]] || unset LD_LIBRARY_PATH
+[[ -n "${LD_PRELOAD}" ]] || unset LD_PRELOAD
+
+# box64 searches /usr/lib/box64-x86_64-linux-gnu on its own (core.c), and that is
+# where the bundled x86-64 libraries it cannot wrap live. Only the C++ runtime,
+# ICU (CoreCLR globalization) and the curl chain are bundled: libc/libm/
+# libpthread/libdl, libvulkan/libGL/libX11 and libssl/libcrypto are all wrapped
+# onto the host's aarch64 libraries. Games that ship their own libraries still
+# win, because box64 searches the executable's directory first.
+BOX64_LIBS=/usr/lib/box64-x86_64-linux-gnu
+if [[ ! -d "${BOX64_LIBS}" ]]; then
+    log "warning: ${BOX64_LIBS} is missing; x86-64 C++/ICU/curl libraries may not load"
+fi
+
+# CoreCLR reserves a huge GC region when it starts, which box64 cannot satisfy;
+# .NET games abort in GC heap init with 0x8007000E (E_OUTOFMEMORY) without this.
+export DOTNET_GCHeapHardLimit="${DOTNET_GCHeapHardLimit:-0x20000000}"
+export DOTNET_gcServer="${DOTNET_gcServer:-0}"
+# Background GC races Godot's disposables tracker under box64: the finalizer
+# thread throws "Disposable not registered" and kills the game a few seconds
+# after Steamworks comes up. A larger heap hard limit makes it worse, so both
+# knobs matter and neither may be dropped.
+export DOTNET_gcConcurrent="${DOTNET_gcConcurrent:-0}"
+# .NET's GC depends on real memory ordering. box64's dynarec defaults to a weak
+# model, and the resulting race kills the game in the finalizer thread with
+# "Disposable not registered" a few seconds after Steamworks initialises.
+# 1 is enough for this workload and far cheaper than 2.
+export BOX64_DYNAREC_STRONGMEM="${BOX64_DYNAREC_STRONGMEM:-1}"
+export BOX64_NOBANNER="${BOX64_NOBANNER:-1}"
+
+# The environment /etc/environment sets is only loaded through PAM, and Steam's
+# gamescope session does not inherit it, hence the explicit exports above.
+
+target="$1"
+machine=""
+if [[ -f "${target}" ]]; then
+    if [[ "$(head -c 4 -- "${target}" 2>/dev/null | od -An -tx1 | tr -d ' \n')" == "7f454c46" ]]; then
+        # ELF e_machine, little endian: 62 = x86-64, 183 = aarch64
+        machine="$(od -An -tu2 -j18 -N2 -- "${target}" 2>/dev/null | tr -d ' \n')"
+    fi
+fi
+
+case "${machine}" in
+    62)
+        exec /usr/bin/box64 "$@"
+        ;;
+esac
+
+# Anything else -- a shell launcher, or an aarch64 binary -- runs as-is. The
+# kernel's binfmt_misc entry routes every x86-64 child back through box64, and
+# these exports are inherited by it.
+exec "$@"

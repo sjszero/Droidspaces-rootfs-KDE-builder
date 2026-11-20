@@ -1694,6 +1694,87 @@ RUN set -eux; \
     systemctl enable mangohud-energy-model.service; \
     rm -rf /var/tmp/mangohud-build /tmp/mangohud-container-metrics.patch; \
     dnf clean all
+# 8e. box64: run x86-64 Linux games on the arm64 container.
+#
+# Steam's arm64 client resolves an x86-64 game's "Steam Linux Runtime 4"
+# dependency to the *arm64* runtime variant, which is a pure aarch64 user space,
+# so the game is ENOEXEC and dies a second after launch. Registering box64 as the
+# kernel's x86-64 binfmt handler makes the game run transparently: Steam needs no
+# wrapper, and starting the binary from a shell behaves identically.
+#
+# Four parts, each load-bearing:
+#
+#   box64 itself   built from upstream, not from Fedora: the 0.3.6 dynarec in the
+#                  repositories lacks `MOVQ xmm, FS:[abs32]`, which Godot's .NET
+#                  runtime emits for TLS access, so every .NET game dies with
+#                  SIGILL on an unimplemented opcode. 0.4.4 implements it.
+#   binfmt handler systemd-binfmt is static and only starts when
+#                  /proc/sys/fs/binfmt_misc is already a mountpoint, which nothing
+#                  mounts in a container, so this unit mounts it and registers
+#                  box64 itself. FEX also claims x86-64 through its own binfmt.d
+#                  entry; box64 is re-registered last so the winner is
+#                  deterministic.
+#   x86-64 libs    only what box64 has no wrapper for: the C++ runtime, ICU and
+#                  the curl chain (~41 MB extracted from Fedora RPMs). libc, Mesa,
+#                  Vulkan, X11 and OpenSSL stay native, so no x86 Mesa and no
+#                  x86 rootfs are needed.
+#   Steam tool     a compatibility tool under /usr/share/steam/compatibilitytools.d,
+#                  so a game's properties offer "box64 (Armada)" next to Proton.
+#                  The launcher carries the .NET knobs, because /etc/environment is
+#                  applied by PAM and the gamescope session never sees it.
+#
+# Pin: BOX64_COMMIT is the revision this container was tested with. Bumping it
+# changes dynarec opcode coverage, so re-run an actual .NET game before shipping.
+ARG BOX64_COMMIT=2f130fab1d6e1a4ee8a71dc60cfdfcc839ad192a
+# The distribution ships its own /etc/box64.box64rc: 19 KB of per-program
+# sections written for 0.3.6 and with no global [*] section at all. Keep it for
+# reference, then install the tuned one -- see box64.box64rc for the measurement
+# behind every value.
+RUN if [ -f /etc/box64.box64rc ] && [ ! -f /etc/box64.box64rc.distro ]; then \
+        cp -a /etc/box64.box64rc /etc/box64.box64rc.distro; \
+    fi
+COPY scripts/armada/box64/box64.box64rc /etc/box64.box64rc
+COPY scripts/armada/box64/build-box64.sh /usr/local/sbin/build-box64
+COPY scripts/armada/box64/install-x86-64-libs.sh /usr/local/sbin/install-box64-x86-64-libs
+COPY scripts/armada/box64/box64-binfmt /usr/libexec/armada/box64-binfmt
+COPY scripts/armada/box64/box64-binfmt.service /usr/lib/systemd/system/box64-binfmt.service
+COPY scripts/armada/box64/compatibilitytool.vdf /usr/share/steam/compatibilitytools.d/box64-armada/compatibilitytool.vdf
+COPY scripts/armada/box64/toolmanifest.vdf /usr/share/steam/compatibilitytools.d/box64-armada/toolmanifest.vdf
+COPY scripts/armada/box64/box64-run /usr/share/steam/compatibilitytools.d/box64-armada/box64-run
+RUN <<'EOF_RUN'
+set -eux
+
+TOOL=/usr/share/steam/compatibilitytools.d/box64-armada
+chmod 0755 /usr/local/sbin/build-box64 /usr/local/sbin/install-box64-x86-64-libs \
+    /usr/libexec/armada/box64-binfmt "$TOOL/box64-run"
+for script in /usr/local/sbin/build-box64 /usr/local/sbin/install-box64-x86-64-libs \
+              /usr/libexec/armada/box64-binfmt "$TOOL/box64-run"; do
+    bash -n "$script"
+done
+
+BOX64_COMMIT="${BOX64_COMMIT:?ARG BOX64_COMMIT must be set}" /usr/local/sbin/build-box64 --jobs "$(nproc)" --install
+/usr/local/sbin/install-box64-x86-64-libs
+/usr/bin/box64 --version
+systemctl enable box64-binfmt.service
+
+# CoreCLR reserves a huge GC region when it starts and box64 cannot satisfy it:
+# .NET games abort in GC heap init with E_OUTOFMEMORY (0x8007000E) without the
+# hard limit. Background GC also races Godot's disposables tracker under box64
+# and kills the game in the finalizer thread ("Disposable not registered"), so it
+# stays off. The compatibility tool exports the same three values itself.
+cat >> /etc/environment <<'EOF_ENV'
+
+# x86-64 emulation (box64). The libraries box64 cannot wrap itself live in
+# /usr/lib/box64-x86_64-linux-gnu, a path box64 always searches, so no
+# library-path variable is needed here.
+DOTNET_GCHeapHardLimit=0x20000000
+DOTNET_gcServer=0
+DOTNET_gcConcurrent=0
+EOF_ENV
+
+rm -rf /var/tmp/box64-build /var/tmp/box64-x86-64-libs
+dnf clean all
+EOF_RUN
 # --- 9. Anland gamescope (built from source, then discarded) ----------------
 # ArmadaOS ships terra-gamescope, but the Anland display backend lives in the
 # anland project and must be compiled against this exact gamescope revision.

@@ -1,0 +1,6 @@
+"manifest"
+{
+	"commandline" "/box64-run %verb% --"
+"version" "2"
+	"use_tool_subprocess_reaper" "1"
+}

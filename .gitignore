@@ -1,3 +1,6 @@
 # Python bytecode from the test suite.
 __pycache__/
 *.py[cod]
+
+# RPMs built by scripts/armada/box64/rpm/build-rpm.sh.
+artifacts/

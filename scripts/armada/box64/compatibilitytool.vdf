@@ -1,0 +1,15 @@
+"compatibilitytools"
+{
+  "compat_tools"
+  {
+    "box64_armada" // Internal name; this is what Steam stores in CompatToolMapping
+    {
+      "install_path" "."
+      "display_name" "box64 (Armada)"
+      // box64 only meaningful for Linux content built for x86-64, so it has to
+      // be offered for Linux games (not windows, which would need Wine as well).
+      "from_oslist"  "linux"
+      "to_oslist"    "linux"
+    }
+  }
+}

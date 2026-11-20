@@ -15,6 +15,22 @@ matching directory rather than at the root, and update the `COPY` lines in
 | `build-mangohud-container.sh` | Fetch a pinned upstream commit, apply that patch, produce a drop-in RPM. |
 | `mangohud-energy-model.service` | Bring up the energy-model sysfs entries MangoHud reads at game start. |
 
+## `box64/` — x86-64 games on the arm64 container
+
+| File | Purpose |
+|---|---|
+| `build-box64.sh` | Build a pinned upstream box64 and register it through alternatives. The distribution package lacks the dynarec opcode that Godot's .NET runtime emits. |
+| `install-x86-64-libs.sh` | Extract the few x86-64 libraries box64 cannot wrap (C++ runtime, ICU, curl chain) from Fedora RPMs into `/usr/lib/box64-x86_64-linux-gnu`. |
+| `box64-binfmt` | Mount `binfmt_misc` and register box64 as the x86-64 interpreter, after FEX, so the winner is deterministic. |
+| `box64-binfmt.service` | Run that registration at boot; `systemd-binfmt` never starts in a container. |
+| `box64-run` | Steam compatibility tool launcher: drops the arm64 library paths Steam injects and sets the .NET knobs the games need. |
+| `box64.box64rc` | Installed as `/etc/box64.box64rc`. Global dynarec tuning for this hardware, with the measurement that justifies each value. |
+| `bench/bench_fs.c` | Freestanding single-thread x86-64 workload (ALU, memory, SSE, call/return), built `-nostdlib` so only dynarec code is timed. |
+| `bench/bench_fs_mt.c` | Freestanding multi-process LOCK-op workload: fork plus a `MAP_SHARED` page, which is the shape of cost strong-memory emulation pays. |
+| `bench/run-matrix.sh` | Rebuilds both workloads with the x86-64 cross compiler and prints one setting per row. |
+| `compatibilitytool.vdf` | Registers `box64 (Armada)` in Steam's compatibility list for Linux games. |
+| `toolmanifest.vdf` | Steam entry point (`/box64-run %verb% --`), deliberately without `require_tool_appid` so the tool runs on the host, not inside the aarch64 Steam Linux Runtime. |
+
 ## `anland/` — display backend and session
 
 | File | Purpose |

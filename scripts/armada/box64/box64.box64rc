@@ -1,0 +1,73 @@
+# System-wide box64 settings for ArmadaOS inside a Droidspaces container.
+#
+# Priority order is: ~/.box64rc > /etc/box64.box64rc > environment variables.
+# Anything set here therefore overrides what a launcher exported, which is why
+# the settings that decide .NET stability live here and not only in the Steam
+# compatibility tool.
+#
+# Every number below was measured on this device (8-core arm64, Android kernel)
+# with the CPU clock PINNED to its hardware maximum (2.27/3.15/2.96/3.40 GHz).
+# That detail matters: an unpinned run is worthless, the governor moved the
+# absolute numbers by 3x and even flipped the sign of two settings below. See
+# scripts/armada/README.md in the builder repo. Two freestanding x86-64 workloads
+# were used, both -nostdlib so only generated code is timed: integer/SSE/
+# call-heavy single thread, and 4 processes contending on LOCK ops.
+
+[*]
+# .NET's GC depends on the real x86 memory order. With 0 the finalizer thread
+# dies on Godot's disposables tracker ("Disposable not registered") a few seconds
+# after Steamworks comes up. Those barriers are not cheap: 0 is 31% faster on the
+# atomic workload than 1. That is the price of a working .NET game, so it gets
+# paid; 2 only adds another 2.5% on top of 1 and buys nothing.
+BOX64_DYNAREC_STRONGMEM=1
+
+# CALL/RET treated as flag-free unless proven otherwise: the one real win measured
+# here, -10% on the single-thread workload and slightly positive on the atomic one.
+# Same trade the upstream "fast" profile makes; installers are excluded below.
+BOX64_DYNAREC_SAFEFLAGS=0
+#
+# Two settings that looked good in an unpinned run and did not survive a
+# re-measurement with the clock locked (medians of 5 and 7 runs):
+#   BOX64_DYNAREC_FORWARD=1024   single thread unchanged, 2-5% WORSE on atomics
+#   BOX64_DYNAREC_PAUSE=1        single thread unchanged, 3-7% WORSE on atomics
+# Both are left out. They are also why this file no longer claims a -9% FORWARD
+# win: that number came from a window where the governor had dropped the clock.
+
+# Deliberately left at their defaults, with the measurement that argues against
+# changing them (clock pinned):
+#   BIGBLOCK=3        no change single thread, 1% worse on atomics. Whatever it
+#                     buys, it also stops checking whether a page was written
+#                     before reusing a block, and .NET's JIT writes code pages
+#                     constantly. Safety keeps it at 2.
+#   SEP=1/2           +28% wall clock. Not a typo; it was the worst setting tried.
+#   ALIGNED_ATOMICS=1 6% worse on atomics, and turns unaligned LOCK into SIGBUS.
+#   NOHOTPAGE=1       not re-measured under a locked clock. It stops trapping
+#                     self-modifying code, which .NET's JIT does constantly, so it
+#                     stays off for safety rather than for speed.
+
+# Android runs with vm.swappiness=180, so reclaiming stale DynaBlocks looks
+# attractive, but BOX64_DYNAREC_PURGE=1 measured a 60% longer cold start
+# (5.2 s -> 9.0 s to the first window) on a JIT-heavy game, because blocks built
+# during startup get retired before they are ever hit again. Left off.
+# BOX64_DYNAREC_PURGE=0
+
+# Recompiling from scratch on every launch is the largest cost a cold x86-64 game
+# pays, so keep the cache; but bound it. Upstream defaults to 2 GiB, which is a
+# lot on a handheld, and the cache already reached 237 MiB here.
+BOX64_DYNACACHE=1
+BOX64_DYNACACHE_LIMIT=1024
+BOX64_DYNACACHE_COMPRESS=1
+
+BOX64_NOBANNER=1
+# BOX64_LOG is left at its default: box64's error lines (missing symbols, bad
+# opcodes) are the first thing to look at when a game misbehaves.
+
+# Installers and setup programs do strange things with flags and code pages, and
+# speed does not matter there. Same values the distribution rc file used.
+[*setup*]
+BOX64_DYNAREC_SAFEFLAGS=2
+BOX64_DYNAREC_BIGBLOCK=0
+
+[*install*]
+BOX64_DYNAREC_SAFEFLAGS=2
+BOX64_DYNAREC_BIGBLOCK=0

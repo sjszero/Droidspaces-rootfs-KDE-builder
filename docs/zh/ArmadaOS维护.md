@@ -501,3 +501,262 @@ scripts/armada/mangohud/build-mangohud-container.sh --dry-run    # 只打印解�
 meson subproject 全部预下载并做 SHA256 校验，通过 `MESON_PACKAGE_CACHE_DIR` 交给 meson，避免 `%build` 阶段才去联网。
 ### 仍未验证
 脚本已在容器内端到端实跑（含 `--install`，产出 1.9M RPM 并生效）；未重建完整镜像。
+
+## 2026-11-18 x86-64 游戏：box64 与 Steam 兼容层
+
+### 现象与根因
+
+Steam 库里唯一的 Linux 游戏 `Slay the Spire 2`（AppID 2868840）启动后进程在 1 秒内 added→removed。`file` 确认游戏本体与全部 `.so` 都是 **x86-64**，数据目录叫 `data_sts2_linuxbsd_x86_64`，depot 里没有 aarch64 构建；但 `config.vdf` 的 `CompatToolMapping` 把它映射到 `steamlinuxruntime_steamrt4-arm64`（runtime AppID 4185400），而那套运行时里只有 aarch64 库。
+
+`compat_log.txt` 显示这是映射优先级的结果，不是用户随手选的：
+
+```text
+Requesting mapping AppID 2868840 from appinfo to tool "SteamLinuxRuntime_sniper"   (priority 90)
+Mapping AppID 2868840 to tool "steamlinuxruntime_steamrt4-arm64" with priority 250  (用户映射)
+```
+
+arm64 客户端把游戏声明的 "Steam Linux Runtime 4" 解析成 arm64 变体。arm64 运行时本身**不是无用**——它是给原生 aarch64 游戏的容器，不负责翻译 x86-64；对当前库（只有 x86-64 内容）确实没有用途。FEX 路线按用户决定不再维护，`fex-emu-*` 与 `ArchLinux.sqsh` 原样保留不动。
+
+复现：在 arm64 运行时里执行游戏 → `Syntax error`（shell 解析）；直接执行 → `无法执行二进制文件`（ENOEXEC）。
+
+### 方案：`scripts/armada/box64/`，Dockerfile `8e` 段
+
+| 组件 | 作用 |
+| --- | --- |
+| `build-box64.sh` | 从上游 pinned commit 编译 box64，strip 后放 `/usr/local/libexec/box64/`，用 alternatives 以优先级 200 接管 `/usr/bin/box64` |
+| `install-x86-64-libs.sh` | 用 `dnf download --forcearch=x86_64` 取 Fedora 的 x86_64 RPM，提取 `.so*` 到 `/usr/lib/box64-x86_64-linux-gnu`（box64 在 `src/core.c` 里固定搜索的目录） |
+| `box64-binfmt` + `.service` | 挂载 `binfmt_misc` 并注册 box64 作为 x86-64 解释器，开机生效 |
+| `compatibilitytool.vdf` / `toolmanifest.vdf` / `box64-run` | Steam 自定义兼容层，游戏属性里可选 `box64 (Armada)` |
+
+透明运行的证据：不显式调用 box64，直接 `./SlayTheSpire2`，内核 binfmt 接管，GPU 14–15%、窗口 1280×720、locale 与存档加载完成。
+
+`systemd-binfmt` 在本容器里永远不会启动：它是 `static` 且带 `ConditionPathIsMountPoint=/proc/sys/fs/binfmt_misc`，而没有任何东西在开机时挂载那个目录，因此 `binfmt.d` 的条目全部静默失效。自建 oneshot 单元先挂载再注册。FEX 也用 `binfmt.d` 声明 x86-64，`binfmt_misc` 对同一 ELF 的多个 handler 按**注册顺序逆序**择优，所以脚本先 `echo -1 > binfmt_misc/box64` 再重新注册，让结果与启动顺序无关。
+
+### 三个必须踩过的坑
+
+1. **发行版 box64 0.3.6 跑不了 .NET 游戏**。Godot Mono 高频使用 `MOVQ xmm, FS:[abs32]`（`64 F3 0F 7E 04 25`）做 TLS 访问，0.3.6 的 dynarec 未实现该形式，SIGILL 在 `0x13703d5`。`BOX64_DYNAREC=0` 走解释器不崩但慢到不可用。上游 0.4.4（`2f130fab`）实现后同一二进制直接过。
+2. **CoreCLR 的 GC 预留 box64 满足不了**。默认配置在 `GC heap initialization failed with error 0x8007000E`（E_OUTOFMEMORY）处中止，`Failed to create CoreCLR`。加 `DOTNET_GCHeapHardLimit=0x20000000`（512MB）+ `DOTNET_gcServer=0` 后可启动。反直觉的是**调大上限更糟**：改成 1GB 时窗口都没创建就 5 秒退出，512MB 是必要值而不是保守值。
+3. **禁用并发 GC 不够，真正的竞态在内存序**。Steamworks 初始化成功后游戏会走云存档/Finalizer 路径，然后在 `System.GC.RunFinalizers()` 抛 `System.ArgumentException: Disposable not registered`（Godot 的 disposables tracker 竞态）并中止。它**非确定性**，所以单次通过不算证据：
+
+| 配置 | 运行次数 | 结果 |
+| --- | --- | --- |
+| 512MB + `gcServer=0`（基线） | 1 | 12 s 崩 |
+| 同上，另一轮 | 1 | 24 s 崩 |
+| `+gcConcurrent=0` | 3 | 30 s 通过 / 3 s 崩 / 24 s 活（不稳定） |
+| `GCHeapHardLimit=0x40000000` + `gcConcurrent=0` | 1 | 5 s 崩，无窗口 |
+| `+BOX64_DYNAREC_STRONGMEM=1` | 6 | 全部 28–30 s 跑满，0 崩溃 |
+| `+BOX64_DYNAREC_STRONGMEM=2` | 4 | 全部 28–30 s 跑满，0 崩溃 |
+
+box64 的 dynarec 默认弱内存模型，.NET GC 的无锁算法需要真实内存序；`STRONGMEM=1` 足够且比 `2` 便宜得多，因此 `box64-run` 里默认设 1（可被外部覆盖）。`gcConcurrent=0` 一并保留。
+
+### x86-64 库只需要 41 MB，不需要 rootfs
+
+box64 把 libc/libm/libpthread/libdl/ld-linux、libvulkan/libGL/libX11、libssl/libcrypto、libasound/libpulse/libudev/libdbus/libfontconfig/libz 等**全部 native wrap** 到宿主的 aarch64 库，所以这些库一个都不能打包（打包会遮蔽宿主 wrapper）。`BOX64_LOG=1` 统计一次完整运行里实际被 emulated 的库只有 8 个：`libstdc++`、`libgcc_s`、`libcurl` 及其 `libnghttp2`/`libnghttp3`/`libngtcp2`/`libssh2` 链，加上 CoreCLR 需要的 ICU。
+
+| 库集 | 大小 | 来源 | 实测 |
+| --- | --- | --- | --- |
+| 早期方案：解包 FEX 的 `ArchLinux.sqsh` | 4.4 GB | Arch Linux rootfs | 可运行，但体积荒谬 |
+| 只放 libstdc++/libgcc_s | 3 MB | Arch rootfs | 在 ICU 处失败 |
+| 补 ICU + curl 链（ICU 78） | 43 MB | Arch rootfs | 通过 |
+| 现方案（ICU 77，Fedora 44） | 41 MB | `dnf download --forcearch=x86_64` | 2/2 运行 30 s 通过，无 ICU/libstdc++ 报错 |
+
+ICU 大版本随 Fedora 走（fc44 是 77），CoreCLR 的 dlopen 版本列表能接受，所以不需要跟 Arch 的 78 对齐。
+
+### Steam 兼容层
+
+`/usr/share/steam/compatibilitytools.d/box64-armada/`，模板取自同目录已有的 `lepton-armada`：
+
+```text
+compatibilitytool.vdf   box64_armada / "box64 (Armada)" / from_oslist linux, to_oslist linux
+toolmanifest.vdf        "commandline" "/box64-run %verb% --"，无 require_tool_appid
+box64-run               过滤 arm64 库路径 + 设置 .NET/STRONGMEM 变量 + 判定 ELF 架构
+```
+
+关键点：
+
+- **不设 `require_tool_appid`**。同目录的 `proton-cachyos-11.0-arm64` 设了 `4185400`，因此 Steam 先把命令塞进 aarch64 的 pressure-vessel 容器，容器里没有宿主 `/usr/bin/box64`。box64 要用的正是宿主的 aarch64 glibc/Mesa/Vulkan，必须留在宿主执行。
+- **必须自己导出环境变量**。`/etc/environment` 由 pam_env 加载，但实测 Steam 客户端进程环境里 `BOX64_LD_LIBRARY_PATH`/`DOTNET_*` 一个都没有（只有 `LD_LIBRARY_PATH=<steamrtarm64>`、`LD_PRELOAD=libXrandr.so.2`、`SYSTEM_PATH`）。兼容层脚本因此无法依赖全局配置。
+- **必须过滤 Steam 注入的 arm64 路径**。x86-64 进程继承 `LD_LIBRARY_PATH=/…/steamrtarm64:/…/lib/aarch64-linux-gnu` 与 arm64 的 `LD_PRELOAD` 会让加载器解出错误架构，脚本按 `*steamrtarm64*|*linuxarm64*|*aarch64*|*gameoverlayrenderer*` 丢弃。
+- 目标可执行文件若是 ELF 且 `e_machine=62` 才交给 `box64`；若是 shell 启动脚本（`launch_vulkan.sh` 之类）就原样 `exec`，脚本内部的 x86-64 子进程由 binfmt 接管并继承同一套环境。
+- Steam 对 2868840 的启动链是 `/bin/sh -c /usr/libexec/armada/armada-game-launch <steam-launch-wrapper> … reaper SteamLaunch AppId=2868840 -- <runtime>/_v2-entry-point --verb=waitforexitandrun -- <game>/SlayTheSpire2`，选定本工具后 `_v2-entry-point` 那一段被替换为 `/usr/share/steam/compatibilitytools.d/box64-armada/box64-run`，`armada-game-launch`（FEX 的 per-game 配置器）仍在最外层，不冲突。
+
+### 仍未验证 / 待办
+
+- 兼容层要在 Steam **启动时**扫描才会注册（`compat_log.txt` 里自定义工具以 `Posting tool registration callback 0 <name>` 出现，AppID 0）。因此 `box64 (Armada)` 进入游戏属性的下拉列表需要重启 Steam；映射改成 `box64_armada` 也必须写 `config.vdf`，而 Steam 运行中不读该文件。
+- Dockerfile `8e` 段未在完整镜像构建中跑过；本次是在现有容器内逐条执行等价命令验证的。
+
+## 2026-11-19 `/etc/box64.box64rc` 针对本机调优
+
+发行版自带的那份 `box64.box64rc`（19 KB，2025-06 生成）是 0.3.6 时代的**按程序名堆叠的节**，没有全局 `[*]` 节，对我们这个"大量 .NET 游戏 + 异构 8 核 + Android 内核"的组合等于没配置。改为本仓库维护的配置，原文件保留为 `/etc/box64.box64rc.distro`。
+
+### 必须先记住的三条机制
+
+| 机制 | 事实 | 影响 |
+| --- | --- | --- |
+| 优先级 | `~/.box64rc` > `/etc/box64.box64rc` > **环境变量** | rcfile 会覆盖启动器 export 的值，所以 `.NET` 的稳定参数必须同时写在 rcfile 里 |
+| 全局节 | `[*]` 是唯一的"对所有程序生效"节，`[*setup*]`/`[*install*]` 是名字通配节 | 具体节只覆盖自己定义的键 |
+| 预设 | 0.4.x 内置 `BOX64_PROFILE=safest/safe/default/fast/fastest`，用 `SET_IF_EMPTY` 语义 | 显式写的键不会被预设覆盖，但 `fast` 会带 `STRONGMEM=1 DIRTY=1 BIGBLOCK=3 SAFEFLAGS=0 FORWARD=1024` |
+
+### 本机环境实测的事实
+
+| 项 | 值 | 对调优的意义 |
+| --- | --- | --- |
+| CPU | 8 核，`cpu_capacity` = 369 369 897 897 897 842 842 1024 | **确有小核且排在前**，`BOX64_SKIPCPU` 理论可用 |
+| `vm.max_map_count` | 2147483642 | 不是瓶颈，不需要为映射数让步 |
+| `vm.overcommit_memory` | 1 | CoreCLR 的大块预留能过 |
+| `vm.swappiness` | **180** | 高换出倾向，长会话下 DynaBlock 膨胀会被压到 swap |
+| 页大小 | 4096 | 无常规坑 |
+| DynaCache | `~/.cache/box64` 已有 237 MiB | 缓存确实在工作，值得设上限 |
+
+### 测法与两个负载
+
+发行版 box64 是 arm64 二进制，要给别人量化"更快"，只能用 x86-64 负载。`dnf install gcc-x86_64-linux-gnu` 提供交叉编译器（Fedora **没有**交叉 glibc 开发包，所以负载写成 `-ffreestanding -nostdlib -static` + 裸 `syscall`，连带省掉了「库调用是否 native wrapped」这个混淆因素）：
+
+| 负载 | 内容 | 针对的参数 |
+| --- | --- | --- |
+| `bench/bench_fs.c` | ALU 依赖链、数组读写、SSE 双精度、call/return 密集混合，跑 ~0.5 s | `FORWARD` `SAFEFLAGS` `BIGBLOCK` `CALLRET` `SEP` |
+| `bench/bench_fs_mt.c` | 4 个 fork 进程用 `MAP_SHARED` 页抢同一 cache line 做 `LOCK` 原子操作 | `STRONGMEM` `WEAKBARRIER` `PAUSE` `ALIGNED_ATOMICS` |
+
+两点经验：`sha256sum` 这类"看起来是计算"的 coreutils 负载**无效**——x86 版本会走到被 wrap 的宿主加速路径，128 MB 只要 134 ms（≈1 GB/s）；交叉编译又缺 glibc 头文件时不要试图拼 sysroot，直接写 freestanding 更省事。
+
+### 单变量结果（中位数，5 次；**未锁频，事后证明不可靠**）
+
+| 设置 | 单线程 ms | 原子 ms |
+| --- | --- | --- |
+| base（仅 `STRONGMEM=1`） | 503.9 | 792.9 |
+| `STRONGMEM=0` | 500.3 | **602.5** |
+| `STRONGMEM=2` | 493.0 | 813.0 |
+| **`FORWARD=1024`** | **457.1** | 806.1 |
+| **`SAFEFLAGS=0`** | **443.6** | 818.9 |
+| `BIGBLOCK=3` | 480.2 | 764.1 |
+| `SEP=1` | 646.0 | 801.7 |
+| `SEP=2` | 646.3 | 797.3 |
+| `CALLRET=1` | 504.9 | 814.2 |
+| `PAUSE=1` / `PAUSE=3` | 506.4 / 505.6 | 766.8 / 762.5 |
+| `ALIGNED_ATOMICS=1` | 514.9 | 819.3 |
+| `WEAKBARRIER=2` | 509.2 | 796.9 |
+| `DIRTY=1` | 506.5 | 813.3 |
+
+组合（`FORWARD=1024 + SAFEFLAGS=0 + BIGBLOCK=3`）：单线程 **448.5**（−11%），原子 819.0（不变）；去掉 `BIGBLOCK=3` 是 453.4，说明 `BIGBLOCK` 的贡献在噪声内。
+
+**反直觉但明确的三点**：
+
+1. **`SEP` 是陷阱**：文档说它是 `CALLRET` 的进一步优化，实测单线程 **+28%**，两档一样；锁频复测里依然 +27.8%，是唯一跨两种条件都成立的结论。
+2. **`STRONGMEM=0` 快 18–24%（原子场景）**，但它是游戏崩溃的根因，绝不能为了这个数字动它；`STRONGMEM=2` 只慢 2.5%，同样不需要。
+3. **`BIGBLOCK=3` 在锁频下没有任何收益**，而它不再检查代码页是否被写过就直接复用块，.NET JIT 一直在写代码页——拦下它的从来是安全性，不是性能。留在默认的 2。
+
+### 游戏级 A/B（未锁频窗口，绝对值不可比；锁频结论见下一节）
+
+用兼容层跑 `Slay the Spire 2`，测到首个窗口的时间（日志里的 `Window changed!` 是游戏自己打的），每种配置 3 次：
+
+| 配置 | 到窗口时间 | RSS |
+| --- | --- | --- |
+| 仅环境变量（今日状态） | 5.2 / 5.2 / 5.8 s；复测 4.7 / 5.2 s | 1.54–1.59 GB |
+| 调优 rcfile（初版，含 `PURGE=1`） | 8.4 / 9.0 / 9.0 s | 1.24 GB |
+| 调优 rcfile（**去掉 `PURGE`**） | **4.5 / 4.5 / 4.5 s**（三次几乎无抖动） | 1.27–1.29 GB |
+| 同上，在**被限频到 1.0–1.08 GHz** 的窗口内复测 | base 13.8 / 14.3 s vs 调优 **12.8 / 12.9 s**（仍快 8.6%） | — |
+
+最后一行是审查时意外得到的额外证据：设备中途被限到约 1/3 频率（`scaling_max_freq` 1.02–1.08 GHz，硬件上限 2.26–3.4 GHz，温度仅 29–30℃ 所以不是热降频；`/run/armada/perf-state.json` 里也没有相关设置，来源在 Android 侧），所有绝对耗时翻了 2.6 倍，但**相对收益不变**。教训：这类对比必须在同一会话内交替进行，跨时间的绝对数字不可比。
+
+- 初版慢 3 秒的元凶是 `BOX64_DYNAREC_PURGE=1`：启动期生成的块在还没被二次命中时就被回收，于是反复重编译。**已关闭**，并在配置注释里写明这条数据。
+- 最终版本比现状**快约 9–10%**，同时 RSS 少 250–300 MB（三次一致，不是单次抖动）。RSS 下降来自 `FORWARD`/`SAFEFLAGS` 改变代码形状，未再细分归因。
+- `BOX64_DYNAREC_PURGE` 对**长会话**的内存价值仍未验证（需要数分钟级别的 RSS 曲线），所以只关不删注释。
+
+### 锁频复测：把 CPU 钉在硬件满档
+
+上面那些绝对值不可比，因为测量期间设备先被限到约 1/3 频率、之后又被拉满。把 `scaling_max_freq` 钉到硬件上限后重测（policy0/2/5/7 = 2265600 / 3148800 / 2956800 / 3398400，三次采样稳定；温度 35–43℃，不是热降频），每个格子 5 次和 7 次中位数各一组：
+
+| 设置 | 单线程 ms | 原子 ms | 相对 base |
+| --- | --- | --- | --- |
+| base（仅 `STRONGMEM=1`） | 413.7 / 412.1 | 657.2 / 677.9 | — |
+| **`SAFEFLAGS=0`** | **372.0 / 367.9** | 677.9 / 670.3 | **单线程 −10%，原子 −1%** |
+| `FORWARD=1024` | 411.2 / 412.7 | 688.4 / 695.6 | 单线程持平，**原子 +2.6…4.8%** |
+| `PAUSE=1` | 411.3 / 411.8 | 703.6 / 701.2 | 单线程持平，**原子 +3.4…7.1%** |
+| `BIGBLOCK=3` | 413.8 | 665.3 | 单线程持平，原子 +1% |
+| `ALIGNED_ATOMICS=1` | 411.8 | 694.5 | 原子 **+5.7%** |
+| `SEP=2` | 528.8 | 682.9 | 单线程 **+27.8%** |
+| `STRONGMEM=0` | 410.3 | **537.1** | 原子 −18%（游戏会崩，不可用） |
+| `shipped`（`FWD+SF0+PAUSE`） | 371.6 / 369.8 | 681.7 / 681.8 | 与单独的 `SF0` 相同 → 另两项是负担 |
+
+**结论修正**（配置与注释已按此更新）：
+
+1. **`SAFEFLAGS=0` 是唯一真实的收益项**：单线程 −10%，原子场景还不吃亏。
+2. **`FORWARD=1024` 没有收益**（那条 −9% 是限频窗口里的伪差异），原子场景反而慢 2–5% → **已从配置移除**。
+3. **`PAUSE=1` 在原子场景反而慢 3–7%** → **已移除**。
+4. `BIGBLOCK=3`、`ALIGNED_ATOMICS=1` 在锁频下同样没有收益，继续按安全性否决。
+5. 最终只剩两个键：`STRONGMEM=1`（稳定性）+ `SAFEFLAGS=0`（性能）。
+
+### 游戏级 A/B，锁频窗口内
+
+预热一次（让各配置的 DynaCache 都命中）后交替跑 3 轮：
+
+| 配置 | 到首个窗口 | RSS |
+| --- | --- | --- |
+| base（仅环境变量） | 4040 / 4048 / 4035 ms | 1.43–1.45 GB |
+| tuned（`/etc/box64.box64rc`） | **3529 / 3528 / 3536 ms** | **1.13–1.17 GB** |
+
+**−12.6% 到窗口、−306 MB RSS、6/6 次无崩溃**，抖动只有 ±10 ms。这是全套改动最干净的一组证据。
+
+### 最终配置（`scripts/armada/box64/box64.box64rc` → `/etc/box64.box64rc`）
+
+| 键 | 值 | 依据 |
+| --- | --- | --- |
+| `DYNAREC_STRONGMEM` | 1 | .NET GC 必须；相对 0 在原子场景慢 31%（barrier 的真实代价），2 只再慢 2.5% |
+| `DYNAREC_SAFEFLAGS` | 0 | 锁频复测里唯一真实的收益：单线程 −10%、原子 −1%；安装器用 `[*install*]` 覆盖回 2 |
+| `DYNACACHE` / `LIMIT` / `COMPRESS` | 1 / 1024 / 1 | 冷启动最贵的一环；上游默认 2 GiB 对手持设备偏大 |
+| `DYNAREC_PURGE` | 不设（默认 0） | 实测让启动慢 60% |
+| `BOX64_NOBANNER` | 1 | 去掉 banner，`BOX64_LOG` 保持默认以便排障 |
+
+显式否决的项（以锁频数据为准）：`SEP`（+28%）、`FORWARD=1024`（无收益，原子 2–5% 更差）、`PAUSE=1`（无收益，原子 3–7% 更差）、`ALIGNED_ATOMICS=1`（原子 −6% 且非对齐 `LOCK` 变 SIGBUS）、`NOHOTPAGE=1`（未在锁频下复测；它不再捕获自修改代码，对 JIT 不安全）、`BIGBLOCK=3`（锁频下无收益且有 JIT 风险）、`SKIPCPU=2`（收益在噪声内，却少用两个核）。
+
+### 仍未验证
+
+未重建镜像；Dockerfile `8e` 段新增的 rcfile COPY 未在完整构建中执行过。基准与 A/B 都是在当前容器内直接跑的。
+## 2026-11-19 星露谷崩溃根因与 box64 的 RPM 化
+
+### 现象
+
+星露谷（413150，box64 链路装好后第一个 x86-64 Linux 游戏）从 Steam 界面启动必定失败：进程树在 11 s / 31 s / 47 s / 72 s / 74 s / 138 s 的随机时刻消失，无窗口，`~/.config/StardewValley` 下没有任何日志，Steam 的 console_log 只有 `Game process added` → `removed`。
+
+两个“看不见”的原因：游戏本身不写日志（除非装 SMAPI），Steam 又会把游戏 stderr 丢掉。
+
+### 根因
+
+用 `strace -e trace=none -e signal=all` 挂在游戏进程上抓到 SIGSEGV，再用 `BOX64_SHOWSEGV=1 BOX64_SHOWBT=1 BOX64_ROLLING_LOG=32`（临时写进 `box64-run`、事后已撤）拿到现场：
+
+```
+x64pc=0x30000e73 "box64/vulkan_layer_getinstanceprocaddr + 0x13"
+EmulatedBT: libSDL2-2.0.so.0(X11_GL_GetVisual+105)
+SIGSEGV for accessing (nil)
+```
+
+崩溃前是一整墙 `Calling vulkan_layer_getinstanceprocaddr(...) => return 0x0`。容器的 GL 是 Mesa zink（`MESA_LOADER_DRIVER_OVERRIDE=zink`，Steam 只对游戏设置，且游戏拿到的是 `DISPLAY=:1`），zink 建 GL 上下文时批量查 instance proc 全得 NULL，SDL2 随后把其中一个当函数指针调用 → 调 NULL → 崩。
+
+二分（每次都以真 Steam 启动 + 观察 90~220 s 为准）：单独禁 gamescope WSI（`VK_LAYER_FROG_gamescope_wsi_aarch64`）、MangoHud、`VK_LAYER_MESA_device_select`、Steam 注入的 `VK_INSTANCE_LAYERS`（VALVE_rpo / fdm_injection） —— 全都在同一地址崩；只有 `VK_LOADER_LAYERS_DISABLE=~all~` 不崩。结论：box64 0.4.4 对 native(aarch64) Vulkan **层链**的 `vkGetInstanceProcAddr` 桥接只要有任何层就崩，与具体哪个层无关。
+
+修法（提交 `c45a178`）：`box64-run` 里 `export VK_LOADER_LAYERS_DISABLE="${VK_LOADER_LAYERS_DISABLE:-~all~}"`。代价是 x86-64 游戏里 MangoHud 覆盖层与 gamescope WSI 失效，原生游戏不受影响。
+
+### 顺带量到的启动成本
+
+手动/复现链（`DISPLAY=:0`、无 Vulkan 层）能把游戏跑到窗口：t≈71–75 s 出现 2480×1116 的 `Stardew Valley` 窗口，33–36 线程，RSS 1.17–1.23 GB，GPU busy 28–65%（确实在渲染）。同一个 box64 下 SS2（Godot Mono）到窗口只要 ~3.5 s —— 星露谷的时间全花在 CoreCLR 冷启动 + JIT 上。所以 Steam 的“启动中”要等一分多钟，别中途停止。
+
+### RPM 化：`scripts/armada/box64/rpm/`
+
+已装容器的人不该为升级 box64 去重建镜像，所以把整套东西打成一个 aarch64 包：
+
+```
+scripts/armada/box64/rpm/build-rpm.sh      # 组 SOURCES + rpmbuild，产物落到仓库 artifacts/
+scripts/armada/box64/rpm/box64-armada.spec
+scripts/armada/box64/rpm/README.md         # 装到 /usr/share/doc/box64-armada/ 给最终用户
+```
+
+包内容：`/usr/bin/box64`（按 pin 的 commit 现编，strip 后）、`/etc/box64.box64rc`、`/usr/lib/box64-x86_64-linux-gnu/` 的 18 个库、`/usr/libexec/armada/box64-binfmt` 与 `/usr/lib/systemd/system/box64-binfmt.service`、`/usr/share/steam/compatibilitytools.d/box64-armada/` 三件套、doc 与 license。
+
+用户侧只需：`sudo dnf install --nogpgcheck ./box64-armada-0.4.4-1.fc44.aarch64.rpm`，装完重启一次 Steam，在游戏属性里选 **box64 (Armada)**。
+
+两个打包坑：
+
+1. **路径归属**。Fedora 的 `box64` 包拥有 `/usr/bin/box64`（alternatives 符号链接），`box64-data` 拥有 `/etc/box64.box64rc` —— 我们要装的恰好是这两个路径。所以包用 `Obsoletes: box64 / box64-data < 0.4.4` + `Provides:` 同名同版本，让 dnf 直接把 0.3.6 换掉，而不是用 alternatives 去抢。`box64-binfmts`（binfmt.d 条目）保持不动，我们的 unit 负责 mount + 确定性重注册。
+2. **x86-64 库不能进依赖生成**。rpm 6.0.2 里 `__provides_exclude_from` 对 ELF 生成器无效；正确的开关是 `__elf_exclude_path`（且要保留 `^/lib/modules/.*` 那条默认值）。不排除的话，这个 aarch64 包会宣告 `Provides: libstdc++.so.6()(64bit)`（可能被拿去满足别的包的依赖，塞进去的却是 x86-64 文件）并凭空 `Requires: libssl.so.3`（那是包内 x86-64 libcurl 的依赖）。已用一个一次性小包验证开关有效（控制组有 `libcurl.so.4()(64bit)`，加排除后为空）。
+
+构建注意：本机 `nproc` 够，但 **CPU 频率会被系统收回**（实测从满档掉到 1.02 GHz），box64 的 LTO 链接在低频下单步就要十几分钟；一次干净构建满频约 6 分钟、1 GHz 下 20 分钟以上。构建脚本支持 `BOX64_SOURCE_TREE=…` 用本地源码树跳过 codeload 下载（本机到 GitHub 只有 ~18 KB/s）。
