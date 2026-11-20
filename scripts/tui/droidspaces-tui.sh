@@ -190,6 +190,13 @@ detect_system() {
         source /etc/os-release
         SYSTEM_ID="${ID,,}"
         SYSTEM_VERSION="$VERSION_ID"
+        # ArmadaOS is Fedora 44 based (ID_LIKE=fedora): treat any armada* id
+        # as fedora 44 so the support, hold and package-suffix lookups below
+        # match instead of falling through to "unsupported".
+        if [[ "$SYSTEM_ID" == armada* ]]; then
+            SYSTEM_ID="fedora"
+            SYSTEM_VERSION="44"
+        fi
         SYSTEM_LABEL="${PRETTY_NAME:-${ID:-Unknown Linux}${VERSION_ID:+ $VERSION_ID}}"
     fi
     ARCHITECTURE="$(uname -m 2>/dev/null || printf 'unknown')"
