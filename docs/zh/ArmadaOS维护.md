@@ -332,6 +332,11 @@ Armada 基础镜像会从两个配置入口把 Bazaar 固定到 Plasma 任务栏
 
 ## ArmadaOS 镜像构建：Gamescope 固定版本不一致（2026-10-30）
 
+> 本节记录的 `3.17.0-ogc1` / `4246b87` / 32 补丁口径**已过时**：2026-11-20 上游切到
+> armadaos-freedom 后，它的补丁集改为 40 个、对应基座 `3.16.31-ogc1`（`afd6eac`），见文末
+> “gamescope 移植到 armadaos-freedom 的基座”一节。同类问题（pin 与补丁数契约不一致）已两次
+> 发生，所以现在把 pin、补丁数、重基补丁都收在 anland 仓库里，配方只做校验。
+
 新编译的 ArmadaOS 容器首次执行 `ArmadaOS.Dockerfile` 时，在 Gamescope 编译入口之前退出：
 
 ```text
@@ -793,3 +798,91 @@ ARMADA_ROOT 实际文件数”，断言本身保留：它能抓住上游悄悄�
 会停在 gamescope 步骤，届时需要同步升 `GAMESCOPE_TAG`/`GAMESCOPE_COMMIT` 或挑一组与
 `3.17.0-ogc1` 兼容的补丁。`anland` 的 `ArmadaOS_v5` 目录名与预设路径未变，但若上游改了
 `build.sh` 的断言写法，重定向片段会显式报错（期望恰好一条 `assert len(patches)==N`）。
+
+## 2026-11-20 gamescope 移植到 armadaos-freedom 的 gamescope 基座（含 anland HDR）
+
+上游的 gamescope 版本不是猜的，是从它的配方里读出来的：`Containerfile` 的 `GAMESCOPE_REF` 由
+packages 流水线产出，而 `packages/gamescope/build.sh` 用 `packages/TERRA.env` 的
+`TERRA_COMMIT=23ec8c9` 检出 terrapkg，再按 `terra-gamescope.spec` 的 `%global ver 3.16.31-ogc1`
+拉源码、叠它自己的 40 个补丁。也就是说**上游交付的 gamescope = 3.16.31-ogc1 + 40 补丁**，
+anland 的这条链要按这个基座做移植。
+
+### 上一节留的未验证项，结论是两套补丁的基座不同
+实测方法：本地克隆各 tag，`patch --batch -p1 --fuzz=0` 顺序整条序列应用，逐补丁记录成败。
+
+| 补丁源 | 目标基座 | 干净应用 |
+| --- | --- | --- |
+| `~/armada` @`298ad1a`（31 个） | `3.17.0-ogc1`（`4246b87`） | 30/31 |
+| `~/armada` @`298ad1a`（31 个） | `3.16.31-ogc1`（`afd6eac`） | 1/31 |
+| `~/armadaos-freedom` @`be6fc783`（40 个） | `3.16.31-ogc1` | 39/40 |
+| `~/armadaos-freedom` @`be6fc783`（40 个） | `3.17.0-ogc1` | 1/40 |
+
+唯一失败项在四组里都是 `0020-libliftoff-fix-multiple-primary-plane-stacking.patch`，它只改
+`subprojects/libliftoff`，探针树没初始化子模块，真实构建里正常应用。两套序列互不兼容，且
+armadaos-freedom 的 40 个补丁对应的是 **`3.16.31-ogc1`**（也就是 terra spec 的 `%global ver`），
+比旧 armada 的 `3.17.0-ogc1` 低一个小版本。上游参照既然定为 armadaos-freedom，基座随之切换：
+`GAMESCOPE_TAG=3.16.31-ogc1`、`GAMESCOPE_COMMIT=afd6eac6e1b5045119831b63854bad68ec4fd92c`。
+
+### anland 的 HDR 补丁必须重基
+`~/anland` 三条 HDR 提交（`c92859e`/`9caac3b`/`55f6572`）改的 `gamescope.patch` 是在**没有** Armada
+序列的树上生成的，于是在 `3.16.31-ogc1` + 40 补丁的树上 4 个 hunk 失去上下文：
+- `src/steamcompmgr.cpp`：Armada 在 `backend.h` 之后插入了自己的 HDR 头文件，把 anland 的 `#include` 顶掉；
+- `src/steamcompmgr.cpp`：Armada 的 SDR 白点缩放块正好落在 anland 的色管块位置；
+- `src/steamcompmgr.cpp`：`paint_all` 一带的上下文被 Armada 改过（此基座上是 3 参签名）；
+- `src/color_helpers.cpp`：`dest_from_source` 的上下文被 Armada 的色彩补丁重排。
+
+重基结果直接落在 anland 自己的 `producers/gamescope/ArmadaOS_v5/gamescope.patch` 里（15 文件 /
+47 hunk，与原补丁同构），仓库不再存第二份副本；镜像构建与 `anland-rebuild-gamescope` 都用
+anland 自带的这份，按 `--fuzz=0` 整条应用。第一版重基踩到一个编译错误：注入的 `#include "anland_backend/hdr.hpp"`
+在本仓库布局下解析不到（overlay 是解到 `src/Backends/anland/`，不是 `src/anland_backend/`），
+已改为 `#include "Backends/anland/hdr.hpp"`（`-I../src` 即可解析）。
+
+### 容器内实际重建（本次已跑通）
+1. `/usr/local/src/anland` 的 `origin` 改到 `SuperTurtleDev/anland`（HDR 在那边；`sjszero/anland` 的
+   `legacy` 停在 `dfa23cd`，两树历史被重写过、没有共同祖先），旧 origin 保留为 `origin-sjszero`，
+   另有 `backup/legacy-dfa23cd` 分支与 `old-image-legacy` tag 兜底；`legacy` 先硬重置到
+   `f7f01d6`（当时的 origin/legacy），随后由 `~/anland` 落出移植提交 `c1e076b`。最终按“提交要落在
+   镜像内置树”的要求改了落位：同一份改动提交在容器树里（`5cbfa95`，tree 与 `c1e076b` 完全相同），
+   `~/anland` 重置回干净的 `f7f01d6`，不留备份 ref。
+2. `/usr/local/bin/anland-rebuild-gamescope` 换成仓库版本，并修掉一个真实 bug：脚本克隆到
+   `$BUILD_ROOT/armada` 却从未定义 `ARMADA_ROOT`，`set -u` 下直接 "unbound variable"。现于头部定义。
+3. 容器内 GitHub 直连超时，加系统级 `url.https://gh.monlor.com/https://github.com/.insteadOf`；
+   ARMADA_ROOT 用本地 `~/armadaos-freedom`（该提交整树 466 MB，网络克隆不划算，`build.sh` 只读
+   `packages/gamescope/patches/*.patch`）。
+4. 镜像的 `exclude=mesa*` 挡住 `pkgconfig(gbm)` 唯一提供者，使 `wlroots0.18-devel` 不可满足；把
+   `mesa-libgbm-devel` 钉到已装的 `26.2.6-1.fc44` 装上（不动 Mesa 主体）后依赖即解（56 装 / 1 升
+   `libaom` / 1 替换）。
+5. `git` 的 safe.directory 挡住 root（树被脚本 chown 给 uid 1000），把 `/usr/local/src/anland`
+   加进系统配置。
+6. `ArmadaOS.Dockerfile` 的 `ANLAND_REPOSITORY` 同步改到 `SuperTurtleDev/anland`：`sjszero/anland`
+   的 `legacy` 停在 `dfa23cd`（没有 `anland_backend/hdr.hpp`），而重基补丁会 include 它，镜像若从
+   旧地址构建会直接编译失败。
+
+### 验证
+- `%prep` 应用 42 个补丁（terra 2 + armada 40）；anland 补丁以 `--fuzz=0` 整条打进
+  `src/steamcompmgr.cpp` 与 `src/color_helpers.cpp`，无 `.rej`。
+- 748/748 目标编译、0 error；产物 `terra-gamescope-1:3.16.31^1-1.fc44.armada.anland` 装回。
+- `gamescope --version` → `3.16.31-ogc1+`；`--help` 仍有 `anland => direct Anland output`；`ldd` 无 not found。
+- HDR 证据：新二进制含 `Anland: imported %u consumer buffers, %s (SDR white %u nits)` 与
+  `Anland: HDR SDR white %u nits, content gain %u%%`，旧基线二进制 0 条。二进制被 strip，`nm`
+  看不到内部符号，故用字符串取证；旧二进制备份在 `~/.cache/gamescope-baseline/`。
+
+### 移植体会在 anland 自己身上
+基座对齐、补丁重基、以及 `ARMADA_ROOT` 的默认值，都当成 anland 的改动提交（`5cbfa95`，落在
+镜像内置的 `/usr/local/src/anland`，`legacy` 领先 `origin/legacy` 一个提交，待推送）：
+- Gamescope 版本断言改成 `afd6eac`（3.16.31-ogc1），补丁数断言改成 `40`；
+- `ARMADA_ROOT` 默认值由 `$HOME/armada` 改为 `$HOME/armadaos-freedom`——上游改名后这才是正确路径，
+  `~/armada` 只是历史克隆；
+- `gamescope.patch` 换成重基版。
+仓库侧因此不再有第二份补丁，也不再改写 anland 的脚本：`ArmadaOS.Dockerfile` 只在构建前做一次校验，
+把 anland 声明的补丁数与 revision 跟实际钉住的 ARMADA_ROOT / GAMESCOPE_COMMIT 对比，不一致就带明确
+信息停下（“push the ported anland before rebuilding”），而不是在外部静默改写。
+容器里 `/usr/local/src/anland` 的 `origin` 直接指 `SuperTurtleDev/anland`（经 `gh.monlor.com`
+代理），旧源保留为 `origin-sjszero`；移植提交目前只存在这棵树里，推到 `SuperTurtleDev/anland`
+即可（推上去之后重建才会把它当成远端内容）。
+
+### 遗留
+- 运行中的 Steam 会话仍是旧二进制，新版本在下次会话启动时生效；本次没有重启会话。
+- 有意新增 `mesa-libgbm-devel`（钉 `26.2.6`）与系统级 git 代理、`safe.directory` 配置。
+- HDR 的端到端功能（APP 控制 10bit 输出、桌面亮度、内容增益）需 APP 侧触发，不在本次验证范围内；
+  本次证明的是代码进入二进制、构建与安装链路完好。

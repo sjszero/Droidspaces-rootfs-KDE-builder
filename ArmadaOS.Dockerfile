@@ -1803,13 +1803,21 @@ EOF_RUN
 # file's assertion and the literal anland hardcodes are driven by the actual
 # file list rather than by a number somebody has to remember to bump.
 
-ARG ANLAND_REPOSITORY=https://github.com/sjszero/anland.git
+# anland is taken from the fork that carries the HDR work. sjszero/anland's
+# legacy branch is stale at dfa23cd (pre-HDR, no anland_backend/hdr.hpp), and the
+# rebased gamescope patch below includes that header, so building from it would
+# fail at compile time. ~/anland tracks this fork's legacy as well.
+ARG ANLAND_REPOSITORY=https://github.com/SuperTurtleDev/anland.git
 ARG ANLAND_BRANCH=legacy
 ARG TERRA_REPOSITORY=https://github.com/terrapkg/packages.git
 ARG TERRA_COMMIT=23ec8c9aeaad28179925232fe7564f80da06d4ab
 ARG GAMESCOPE_REPOSITORY=https://github.com/OpenGamingCollective/gamescope
-ARG GAMESCOPE_TAG=3.17.0-ogc1
-ARG GAMESCOPE_COMMIT=4246b87f49d6116d5f863131dcc401fc52840644
+# armadaos-freedom's series is written against 3.16.31-ogc1: 39 of its 40
+# patches apply at fuzz 0 there, while only 1 of 40 does on 3.17.0-ogc1 (the tag
+# the older armada 31-patch series targets). Following the patch source means
+# following its base.
+ARG GAMESCOPE_TAG=3.16.31-ogc1
+ARG GAMESCOPE_COMMIT=afd6eac6e1b5045119831b63854bad68ec4fd92c
 ARG ANLAND_JOBS=4
 
 # Armada pins used by the gamescope build below and by the anland-rebuild-gamescope
@@ -1947,23 +1955,31 @@ PC
 # anland tree (kept)
 rm -rf "$ANLAND"
 git clone --quiet --branch "$ANLAND_BRANCH" "$ANLAND_REPOSITORY" "$ANLAND"
-# anland's build.sh pins the size of the Armada gamescope patch series it was
-# written against (assert len(patches)==31, the count at armada d5c23cd) and
-# builds the RPM spec from that same list. The upstream is armadaos-freedom now,
-# whose series is longer, so the literal is rewritten from what the pinned
-# ARMADA_ROOT actually carries. The assertion itself is kept - it is what catches
-# a series that silently changed size - and this fails loudly if anland's script
-# stops looking the way it does today.
-python3 - "$ANLAND/producers/gamescope/ArmadaOS_v5/build.sh" "$ARMADA_ROOT" <<'PY_ARMADA'
+# anland carries the port itself (a local commit above origin/legacy): its build.sh already pins
+# gamescope afd6eac / 3.16.31-ogc1 and the 40 Armada patches, and its own
+# gamescope.patch is the rebased copy. Nothing is rewritten from here any more;
+# this only checks the pins against what this build is about to use, so a clone
+# that still lags fails with a pointed message instead of a patch reject later.
+python3 - "$ANLAND/producers/gamescope/ArmadaOS_v5/build.sh" "$ARMADA_ROOT" "$GAMESCOPE_COMMIT" <<'PY_ARMADA'
 import pathlib, re, sys
-script, armada = map(pathlib.Path, sys.argv[1:3])
+script = pathlib.Path(sys.argv[1])
+armada = pathlib.Path(sys.argv[2])
+revision = sys.argv[3]
 count = len(list((armada / 'packages/gamescope/patches').glob('[0-9][0-9][0-9][0-9]-*.patch')))
 text = script.read_text()
-new, n = re.subn(r'assert len\(patches\)==\d+', f'assert len(patches)=={count}', text)
-if n != 1:
-    sys.exit(f'expected exactly one patch-count assert in {script}, found {n}')
-script.write_text(new)
-print(f'anland build.sh: armada patch count assert retargeted to {count}')
+declared = re.search(r'assert len\(patches\)==(\d+)', text)
+if declared is None:
+    sys.exit(f'no patch-count assert found in {script}')
+if int(declared.group(1)) != count:
+    sys.exit('anland expects ' + declared.group(1) + ' Armada patches, the pinned tree carries '
+             + str(count) + ': push the ported anland before rebuilding')
+pinned = re.search(r'rev-parse HEAD\) == ([0-9a-f]{40})', text)
+if pinned is None:
+    sys.exit(f'no gamescope revision assert found in {script}')
+if pinned.group(1) != revision:
+    sys.exit('anland pins gamescope ' + pinned.group(1) + ', this build uses ' + revision
+             + ': push the ported anland before rebuilding')
+print(f'anland recipe agrees with the pinned inputs: {count} patches, gamescope {revision}')
 PY_ARMADA
 
 # build
@@ -2004,7 +2020,15 @@ rpm -Uvh --oldpackage --replacepkgs "${RPMS[@]}"
 # verify
 # The installed compositor must report the anland backend before the sources go.
 test -x /usr/bin/gamescope
-/usr/bin/gamescope --help 2>&1 | grep -q 'anland'
+# Capture the help text and match with a case: grep -q in a pipeline closes the
+# pipe early, which can kill gamescope with SIGPIPE (and under pipefail abort
+# the run before the dependency cleanup). case is POSIX, so it also works in
+# the image step, whose heredoc RUN has no SHELL override.
+GAMESCOPE_HELP=$(/usr/bin/gamescope --help 2>&1 || true)
+case "$GAMESCOPE_HELP" in
+    *anland*) ;;
+    *) echo 'gamescope --help no longer advertises the anland backend' >&2; exit 1 ;;
+esac
 test -x /usr/libexec/gamescope-anland/startup.sh
 rpm -q terra-gamescope
 
@@ -2037,10 +2061,16 @@ set -euo pipefail
 ANLAND=/usr/local/src/anland
 BUILD_ROOT=/var/tmp/anland-gamescope-build
 CACHE="$BUILD_ROOT/cache"
+# The pinned Armada checkout is what both the gamescope recipe and the
+# patch-count check below read. Define it here: the image build only ever
+# had it as a shell variable in its own RUN step, so a bare run of this script
+# hit "ARMADA_ROOT: unbound variable" under set -u.
+ARMADA_ROOT="$BUILD_ROOT/armada"
 ARMADA_REPOSITORY=${ARMADA_REPOSITORY:-https://github.com/ArmadaOS-Freedom/armadaos-freedom.git}
 ARMADA_COMMIT=be6fc7834012c54a1ae7b8ae8dfba39196064458
 TERRA_COMMIT=23ec8c9aeaad28179925232fe7564f80da06d4ab
-GAMESCOPE_TAG=${GAMESCOPE_TAG:-3.17.0-ogc1}
+GAMESCOPE_TAG=${GAMESCOPE_TAG:-3.16.31-ogc1}
+GAMESCOPE_COMMIT=${GAMESCOPE_COMMIT:-afd6eac6e1b5045119831b63854bad68ec4fd92c}
 JOBS=${JOBS:-$(nproc)}
 
 (( EUID == 0 )) || { echo 'anland-rebuild-gamescope: must run as root' >&2; exit 1; }
@@ -2055,6 +2085,10 @@ trap cleanup EXIT
 rm -rf "$BUILD_ROOT"
 install -d -m 0755 "$CACHE/recipe" "$CACHE/sdk/usr/lib64/pkgconfig" "$BUILD_ROOT"
 
+# Snapshot first: the transaction below is what this script adds, and the diff at
+# the end is what gets removed again. Taken after it, the diff could never see
+# the build dependencies and every rebuild would leave ~37 MB of -devel behind.
+rpm -qa --qf '%{NAME}\n' | sort > "$BUILD_ROOT/pkgs-before.txt"
 dnf -y install --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
     gcc gcc-c++ make cmake meson ninja-build rpm-build git-core tar patch \
     pkgconf-pkg-config python3 glm-devel google-benchmark-devel \
@@ -2077,7 +2111,6 @@ if [ "$(rpm --eval '%{evr}')" = '%{evr}' ]; then
     echo 'the gamescope RPMs would be unsatisfiable. Aborting.' >&2
     exit 1
 fi
-rpm -qa --qf '%{NAME}\n' | sort > "$BUILD_ROOT/pkgs-before.txt"
 
 # Pick up newer backend changes before rebuilding.
 git -C "$ANLAND" fetch --quiet origin
@@ -2125,23 +2158,31 @@ URL: https://gitlab.freedesktop.org/xorg/xserver/
 Version: 24.1.14
 PC
 
-# anland's build.sh pins the size of the Armada gamescope patch series it was
-# written against (assert len(patches)==31, the count at armada d5c23cd) and
-# builds the RPM spec from that same list. The upstream is armadaos-freedom now,
-# whose series is longer, so the literal is rewritten from what the pinned
-# ARMADA_ROOT actually carries. The assertion itself is kept - it is what catches
-# a series that silently changed size - and this fails loudly if anland's script
-# stops looking the way it does today.
-python3 - "$ANLAND/producers/gamescope/ArmadaOS_v5/build.sh" "$ARMADA_ROOT" <<'PY_ARMADA'
+# anland carries the port itself (a local commit above origin/legacy): its build.sh already pins
+# gamescope afd6eac / 3.16.31-ogc1 and the 40 Armada patches, and its own
+# gamescope.patch is the rebased copy. Nothing is rewritten from here any more;
+# this only checks the pins against what this build is about to use, so a clone
+# that still lags fails with a pointed message instead of a patch reject later.
+python3 - "$ANLAND/producers/gamescope/ArmadaOS_v5/build.sh" "$ARMADA_ROOT" "$GAMESCOPE_COMMIT" <<'PY_ARMADA'
 import pathlib, re, sys
-script, armada = map(pathlib.Path, sys.argv[1:3])
+script = pathlib.Path(sys.argv[1])
+armada = pathlib.Path(sys.argv[2])
+revision = sys.argv[3]
 count = len(list((armada / 'packages/gamescope/patches').glob('[0-9][0-9][0-9][0-9]-*.patch')))
 text = script.read_text()
-new, n = re.subn(r'assert len\(patches\)==\d+', f'assert len(patches)=={count}', text)
-if n != 1:
-    sys.exit(f'expected exactly one patch-count assert in {script}, found {n}')
-script.write_text(new)
-print(f'anland build.sh: armada patch count assert retargeted to {count}')
+declared = re.search(r'assert len\(patches\)==(\d+)', text)
+if declared is None:
+    sys.exit(f'no patch-count assert found in {script}')
+if int(declared.group(1)) != count:
+    sys.exit('anland expects ' + declared.group(1) + ' Armada patches, the pinned tree carries '
+             + str(count) + ': push the ported anland before rebuilding')
+pinned = re.search(r'rev-parse HEAD\) == ([0-9a-f]{40})', text)
+if pinned is None:
+    sys.exit(f'no gamescope revision assert found in {script}')
+if pinned.group(1) != revision:
+    sys.exit('anland pins gamescope ' + pinned.group(1) + ', this build uses ' + revision
+             + ': push the ported anland before rebuilding')
+print(f'anland recipe agrees with the pinned inputs: {count} patches, gamescope {revision}')
 PY_ARMADA
 BUILD_USER=${BUILD_USER:-$(getent passwd 1000 | cut -d: -f1)}
 [[ -n $BUILD_USER ]] || { echo 'anland-rebuild-gamescope: no uid 1000 user' >&2; exit 1; }
@@ -2159,7 +2200,15 @@ mapfile -t RPMS < <(find "$ARTIFACTS" -maxdepth 1 -name '*.rpm' \
     ! -name '*-debuginfo-*' ! -name '*-debugsource-*' | sort)
 ((${#RPMS[@]})) || { echo 'anland-rebuild-gamescope: no RPMs produced' >&2; exit 1; }
 rpm -Uvh --oldpackage --replacepkgs "${RPMS[@]}"
-/usr/bin/gamescope --help 2>&1 | grep -q 'anland'
+# Capture the help text and match with a case: grep -q in a pipeline closes the
+# pipe early, which can kill gamescope with SIGPIPE (and under pipefail abort
+# the run before the dependency cleanup). case is POSIX, so it also works in
+# the image step, whose heredoc RUN has no SHELL override.
+GAMESCOPE_HELP=$(/usr/bin/gamescope --help 2>&1 || true)
+case "$GAMESCOPE_HELP" in
+    *anland*) ;;
+    *) echo 'gamescope --help no longer advertises the anland backend' >&2; exit 1 ;;
+esac
 
 rpm -qa --qf '%{NAME}\n' | sort > "$BUILD_ROOT/pkgs-after.txt"
 comm -13 "$BUILD_ROOT/pkgs-before.txt" "$BUILD_ROOT/pkgs-after.txt" \
