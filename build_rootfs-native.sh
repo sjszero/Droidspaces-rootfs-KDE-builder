@@ -84,11 +84,6 @@ if [[ "$DESKTOP" == kde-mobile || "$DESKTOP" == gnome || "$DESKTOP" == anland-ne
       "$DESKTOP" == niri || "$DESKTOP" == hyprland || "$DESKTOP" == mango || "$DESKTOP" == denial ]]; then
   DISPLAY_BACKEND="anland-wayland"
 fi
-if [[ "$DISPLAY_BACKEND" == anland-wayland ]]; then
-  PulseAudio="none"
-fi
-ANLAND_PACKAGE_FAMILY="$(anland_package_family "$DESKTOP" "$DISPLAY_BACKEND" || true)"
-
 # 校验：检查是否传递了 Dockerfile 模板文件
 if [ -z "$DOCKERFILE" ]; then
     echo "错误：必须使用 -i 参数指定模板文件。"
@@ -103,6 +98,14 @@ fi
 
 # 提取发行版目标名称（例如：Debian-13.Dockerfile -> Debian-13）
 PREFIX="$(basename "${DOCKERFILE%.Dockerfile}")"
+
+if [[ "$PREFIX" == Fedora-45 && "$DESKTOP" == kde ]]; then
+  DISPLAY_BACKEND="anland-wayland"
+fi
+if [[ "$DISPLAY_BACKEND" == anland-wayland ]]; then
+  PulseAudio="none"
+fi
+ANLAND_PACKAGE_FAMILY="$(anland_package_family "$DESKTOP" "$DISPLAY_BACKEND" || true)"
 
 if ! desktop_target_supported "$PREFIX" "$DESKTOP"; then
   echo "错误：$PREFIX 不支持桌面 $DESKTOP。" >&2
@@ -130,6 +133,15 @@ echo " 桌面：$DESKTOP"
 echo " 显示后端：$DISPLAY_BACKEND"
 echo " 桌面自启动：$DESKTOP_AUTOSTART"
 echo "========================================================="
+
+# 为本次构建获取当前发布的 TUI 与安装器。
+mkdir -p -- "$REPO_DIR/.build" || exit 1
+TUI_DIR="$(mktemp -d "$REPO_DIR/.build/tui.XXXXXXXX")" || exit 1
+trap 'rm -rf -- "$TUI_DIR"; rm -f -- "$TUI_DIR.lock"' EXIT
+if ! bash "$REPO_DIR/scripts/sync-tui.sh" --output "$TUI_DIR" \
+    --source "${DROIDSPACES_TUI_SOURCE:-github}"; then
+  exit 1
+fi
 
 if [ -n "$ANLAND_PACKAGE_FAMILY" ]; then
   if ! anland_prepare_release "$ANLAND_PACKAGE_FAMILY" "$ANLAND_RELEASE_REPOSITORY" "$ANLAND_PACKAGE_REVISION"; then
@@ -177,6 +189,7 @@ echo "正在运行 Docker Build (原生模式)..."
 
 
 docker buildx build \
+  --build-context "droidspaces-tui=$TUI_DIR" \
   --target export \
   --output type=tar,dest="$TEMP_TAR" \
   --build-arg DESKTOP="$DESKTOP" \

@@ -4,7 +4,9 @@
 
 ## Subscribe to the rolling desktop feed
 
-In Droidspaces repository management, add [Chinese RootFS (GitHub)](https://github.com/Goldzxcbug/Droidspaces-rootfs-Desktop-builder/releases/download/droidspaces-rootfs-all-wayland/rootfs_zh.json), [Chinese RootFS (CNB)](https://cnb.cool/goldzxcbug/droidspaces-package/-/releases/download/droidspaces-rootfs-all-wayland/rootfs_zh.json), or [English RootFS (GitHub)](https://github.com/Goldzxcbug/Droidspaces-rootfs-Desktop-builder/releases/download/droidspaces-rootfs-all-wayland/rootfs_en.json). Each Chinese index uses download URLs from its own source. The rolling release updates weekly and includes every Anland Wayland desktop for Debian 13, Ubuntu 26, Fedora 43/44, and Arch.
+In Droidspaces repository management, add [Chinese RootFS (GitHub)](https://github.com/Goldzxcbug/Droidspaces-rootfs-Desktop-builder/releases/download/droidspaces-rootfs-all-wayland/rootfs_zh.json), [Chinese RootFS (CNB)](https://cnb.cool/goldzxcbug/droidspaces-package/-/releases/download/droidspaces-rootfs-all-wayland/rootfs_zh.json), or [English RootFS (GitHub)](https://github.com/Goldzxcbug/Droidspaces-rootfs-Desktop-builder/releases/download/droidspaces-rootfs-all-wayland/rootfs_en.json). Each Chinese index uses download URLs from its own source. The GitHub rolling release updates weekly and includes every Anland Wayland desktop for Debian 13, Ubuntu 26, Fedora 43/44/45, and Arch.
+
+Sync CNB manually by running the “发布全桌面 Wayland RootFS” workflow. Enable `sync_cnb` to sync after building, or `sync_cnb_only` to sync an existing Release. Both options are disabled by default.
 
 ## 1. Build with GitHub Actions
 
@@ -13,7 +15,7 @@ In Droidspaces repository management, add [Chinese RootFS (GitHub)](https://gith
 3. Choose a distribution, desktop, display backend, and optional features, then start the workflow.
 4. When it completes, download the `.tar.xz` from `Releases`. Archives larger than 1900 MiB are published as `.tar.xz.zip.001`, `.002`, etc.
 
-A common Wayland setup uses Debian 13, Ubuntu 26, Fedora 43/44, or Arch, with desktop `KDE` and backend `anland-wayland`. You can keep the defaults for a first build. Some defaults differ between the English and Chinese workflows; see [build options](build-options.md).
+A common Wayland setup uses Debian 13, Ubuntu 26, Fedora 43/44/45, or Arch, with desktop `KDE` and backend `anland-wayland`. You can keep the defaults for a first build. Some defaults differ between the English and Chinese workflows; see [build options](build-options.md).
 
 Wayland builds use patched desktop packages published in `Goldzxcbug/droidspaces-package`. To use your package-repository fork, set `wayland_package_repository` to its public `owner/repository` and publish the matching Anland package Release there.
 
@@ -46,4 +48,4 @@ The default username is `Gold` and the default password is `1234` (use your cust
 passwd
 ```
 
-`all` and `all-wayland` build multiple compatible targets. GNOME, Niri, Hyprland, Mango, and Denial are available on Debian 13, Ubuntu 26, Fedora 43/44, and Arch Linux ARM. See the [compatibility matrix](build-options.md).
+`all` and `all-wayland` build multiple compatible targets. GNOME, Niri, Hyprland, Mango, and Denial are available on Debian 13, Ubuntu 26, Fedora 43/44/45, and Arch Linux ARM. See the [compatibility matrix](build-options.md).

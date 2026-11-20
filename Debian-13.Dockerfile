@@ -35,43 +35,10 @@ RUN (sed -i 's/main/main contrib non-free/g' /etc/apt/sources.list 2>/dev/null |
     apt-get update && \
     apt-get upgrade -y
 
-# 优先复制自定义脚本
-COPY scripts/download-firmware /usr/local/bin/
-
-# 将自定义的 bashrc 脚本复制到根文件系统的 profile 目录
-COPY scripts/bashrc.sh /etc/profile.d/ds-aliases.sh
-
-# 通用 Droidspaces USB Manager 安装器
-COPY scripts/install-usb-manager.sh /usr/local/sbin/install-droidspaces-usb-manager
-COPY scripts/systemd257.sh /usr/local/sbin/systemd257
-COPY scripts/tui/install-anland-kde.sh /usr/local/sbin/install-anland-kde
-COPY scripts/tui/install-anland-gnome.sh /usr/local/sbin/install-anland-gnome
-COPY scripts/tui/install-anland-next.sh /usr/local/sbin/install-anland-next
-COPY scripts/tui/install-anland-niri.sh /usr/local/sbin/install-anland-niri
-COPY scripts/tui/install-anland-hyprland.sh /usr/local/sbin/install-anland-hyprland
-COPY scripts/tui/install-anland-mango.sh /usr/local/sbin/install-anland-mango
-COPY scripts/tui/install-anland-denial.sh /usr/local/sbin/install-anland-denial
-COPY scripts/install-anland-desktop.sh /usr/local/sbin/install-anland-desktop
-COPY scripts/tui/install-mesa.sh /usr/local/sbin/install-mesa
-COPY scripts/tui/install-hangover-wine.sh /usr/local/sbin/install-hangover-wine
-COPY scripts/tui/install-winefonts.sh /usr/local/sbin/install-winefonts
-COPY scripts/tui/droidspaces-tui.sh /usr/local/bin/droidspaces-tui
-COPY scripts/tui/droidspaces-gpu.sh /usr/local/bin/droidspaces-gpu
-COPY scripts/install-desktop.sh /usr/local/sbin/install-desktop
-COPY scripts/configure-desktop.sh /usr/local/sbin/configure-desktop
-COPY scripts/configure-chrome.sh /usr/local/sbin/configure-chrome
-COPY scripts/start-desktop-session.sh /usr/local/bin/start-desktop-session
-COPY scripts/desktops/ /usr/local/lib/droidspaces/desktops/
-COPY scripts/etc/wireplumber/wireplumber.conf.d/Anland-Audio.conf /tmp/Anland-Audio.conf
-RUN if [ "$DISPLAY_BACKEND" = "anland-wayland" ]; then \
-        install -D -m 0644 /tmp/Anland-Audio.conf /etc/wireplumber/wireplumber.conf.d/Anland-Audio.conf; \
-    fi && \
-    rm -f /tmp/Anland-Audio.conf
-
-# 赋予相关脚本可执行权限
-RUN chmod +x /usr/local/bin/download-firmware /etc/profile.d/ds-aliases.sh /usr/local/sbin/install-anland-* /usr/local/sbin/install-mesa /usr/local/sbin/install-hangover-wine /usr/local/sbin/install-winefonts /usr/local/sbin/install-desktop /usr/local/sbin/configure-desktop /usr/local/sbin/configure-chrome /usr/local/bin/droidspaces-tui /usr/local/bin/droidspaces-gpu /usr/local/bin/start-desktop-session /usr/local/lib/droidspaces/desktops/*.sh && \
-    ln -s droidspaces-tui /usr/local/bin/dstui && \
-    ln -s droidspaces-tui /usr/local/bin/ds-tui
+# 构建时只读挂载源码，由统一脚本安装所需文件。
+RUN --mount=type=bind,source=scripts,target=/run/droidspaces-scripts \
+    --mount=type=bind,from=droidspaces-tui,target=/run/droidspaces-tui \
+    bash /run/droidspaces-scripts/install-rootfs-tools.sh --tui-dir /run/droidspaces-tui
 
 # Debian 基础镜像默认通过 dpkg path-exclude 跳过 .mo 翻译文件；全局放开，
 # 保证所有桌面 profile 安装的软件带完整语言翻译。
@@ -81,7 +48,7 @@ RUN sed -i 's|^path-exclude=/usr/share/locale/\*/LC_MESSAGES/\*.mo|#&|' \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     # 核心工具组件
-    bash jq dialog coreutils file findutils grep sed gawk curl wget ca-certificates locales bash-completion udev dbus systemd-sysv systemd-resolved fastfetch \
+    bash jq dialog util-linux coreutils diffutils file findutils grep sed gawk curl wget ca-certificates locales bash-completion udev dbus systemd-sysv systemd-resolved fastfetch \
     # 用户请求的基础开发/编辑工具
     git nano  sudo \
     # 网络与 SSH 工具
@@ -99,12 +66,8 @@ RUN apt-get update && \
         echo "--> [开启] $DESKTOP 的 Anland 支持已安装"; \
     fi && \
     ######################################################################################################
-    #输入法 fcitx5 (可选)
     if [ "$ENABLE_srf_ARG" = "true" ]; then \
-        apt-get install -y fcitx5; \
-    fi && \
-    if [ "$ENABLE_srf_ARG" = "true" ] && [ "$ENABLE_zh_tz_ARG" = "true" ]; then \
-        apt-get install -y  fcitx5-chinese-addons; \
+        /usr/local/sbin/install-fcitx5 install "${ENABLE_zh_tz_ARG:-false}"; \
     fi && \
     ## 开发工具集成 (可选)
     if [ "$ENABLE_kfgj_ARG" = "true" ]; then \
@@ -180,32 +143,10 @@ RUN if [ "$PulseAudio" = "socket" ]; then \
 #       echo -e "\n[Sounds]\nEnable=false" >> /home/${USERNAME}/.config/kdeglobals ; \
 #     fi
 
-# 输入法开机自启动
+# 配置桌面会话与可选输入法
 COPY scripts/start/ /tmp/droidspaces-start/
 RUN <<'EOF_RUN'
-    if [ "$ENABLE_srf_ARG" = "true" ]; then
-    mkdir -p /home/${USERNAME}/.config/autostart
-    cat <<'EOF' > /home/${USERNAME}/.config/autostart/fcitx5.desktop
-[Desktop Entry]
-Name=Fcitx5
-GenericName=Input Method
-Comment=Start Input Method
-Exec=fcitx5 -d
-Icon=fcitx
-Terminal=false
-Type=Application
-Categories=System;Utility;
-StartupNotify=false
-NoDisplay=true
-EOF
-    cat <<'EOF' >> /etc/environment
-XMODIFIERS=@im=fcitx5
-GTK_IM_MODULE=fcitx5
-QT_IM_MODULE=fcitx5
-SDL_IM_MODULE=fcitx5
-GLFW_IM_MODULE=fcitx
-EOF
-    fi
+    set -e
 
     if [ "$ENABLE_mesa_ARG" = "true" ] && [ "$DISPLAY_BACKEND" != "anland-wayland" ] ; then
         cat <<'EOF' >> /etc/environment
@@ -416,6 +357,7 @@ RUN rm -f \
         /usr/local/sbin/configure-chrome \
         /usr/local/sbin/configure-desktop \
         /usr/local/sbin/install-desktop \
+        /usr/local/sbin/install-fcitx5 \
         /usr/local/sbin/install-anland-desktop \
         /usr/local/sbin/install-droidspaces-usb-manager \
         /usr/local/sbin/systemd257 \

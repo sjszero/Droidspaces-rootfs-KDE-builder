@@ -8,7 +8,7 @@
 
 | 桌面与后端 | 手动启动命令 |
 | --- | --- |
-| KDE + X11（Arch 不支持） | `DISPLAY=:5 startplasma-x11` |
+| KDE + X11（Fedora 45 与 Arch 不支持） | `DISPLAY=:5 startplasma-x11` |
 | KDE + Anland Wayland | `startplasma-wayland` |
 | KDE Mobile + Anland Wayland | `startplasmamobile` |
 | GNOME + Anland Wayland | `gnome-session --session=gnome` |
@@ -30,9 +30,7 @@ startplasma-x11
 
 ### Wayland 和 Anland 宿主端配置
 
-Anland Wayland 支持 Debian 13、Ubuntu 26、Fedora 43/44 和 Arch。Arch KDE 仅使用 Anland Wayland；KDE 使用 patched KWin/Xwayland，GNOME 使用 patched Mutter。GNOME 在这些发行版上安装完整桌面和基础应用。Niri、Hyprland、Mango、Denial 提供轻量会话、终端、XDG portal、音频和字体，用户可自行添加桌面应用。它们的 ARM64 包由 [`droidspaces-package`](https://github.com/Goldzxcbug/droidspaces-package) 发布，RootFS 构建时从对应 Release 安装。
-
-轻量 compositor 各自使用独立的 `desktops/<slug>.sh` profile；profile 会将会话与 Anland/Mesa 环境写入 `/etc/environment`。统一桌面启动入口直接运行包提供的 compositor 命令，不使用 `--session`。
+Anland Wayland 支持 Debian 13、Ubuntu 26、Fedora 43/44/45 和 Arch。Fedora 45 与 Arch 的 KDE 仅使用 Anland Wayland；KDE 使用 patched KWin/Xwayland，GNOME 使用 patched Mutter。GNOME 在这些发行版上安装完整桌面和基础应用。Niri、Hyprland、Mango、Denial 提供轻量会话、终端、XDG portal、音频和字体，用户可自行添加桌面应用。它们的 ARM64 包由 [`droidspaces-package`](https://github.com/Goldzxcbug/droidspaces-package) 发布，RootFS 构建时从对应 Release 安装。
 
 在 Android 设备上完成以下准备：
 
@@ -49,20 +47,24 @@ Anland Wayland 支持 Debian 13、Ubuntu 26、Fedora 43/44 和 Arch。Arch KDE �
 
 启动容器并以普通用户登录。KDE 可手动运行 `startplasma-wayland`；KDE Mobile 使用 `startplasmamobile`；GNOME 使用 `gnome-session --session=gnome`。
 
+### Fcitx5 输入法
+
+构建时开启 `enable_srf` 即可安装 Fcitx5。中文环境会预设拼音，进入桌面后在输入框按 `Ctrl+Space` 切换。Wayland 会话中的 GTK3/4 和较新的 Qt6 应用优先使用 Wayland 输入协议，XWayland 应用通过 XIM 或 GTK、Qt 输入法模块接入同一个 Fcitx5 实例。Anland Next 的原生 GTK、Qt 应用使用 Fcitx5 模块。
+
+Wayland 镜像中的 Chrome 默认走 Wayland 输入法。要验证 XWayland 路径，退出已打开的 Chrome，再运行 `google-chrome --ozone-platform=x11`，在地址栏测试拼音。也可以使用 `GDK_BACKEND=x11` 或 `QT_QPA_PLATFORM=xcb` 分别启动 GTK 或 Qt 应用进行验证。
+
 ### 安装或更新 Anland 桌面组件
 
-构建时会自动获取匹配包。若要在已运行的 ARM64 RootFS 中单独安装，可从仓库根目录执行：
+构建时会自动获取匹配包。若要在已运行的 ARM64 RootFS 中单独安装，可在容器内执行：
 
 ```bash
-sudo ./scripts/tui/install-anland-kde.sh
+sudo install-anland-kde
 ```
 
-GNOME 安装器可在 Debian 13、Ubuntu 26、Fedora 43/44 与 Arch Linux ARM 上使用：
+GNOME 安装器可在 Debian 13、Ubuntu 26、Fedora 43/44/45 与 Arch Linux ARM 上使用：
 
 ```bash
-sudo ./scripts/tui/install-anland-gnome.sh
+sudo install-anland-gnome
 ```
-
-GNOME 安装器已支持 Debian、Ubuntu、Fedora 和 Arch 的包格式，并从 `anland-gnome-packages` Release 清单读取匹配目标。
 
 安装器选项、下载源和校验方式见[脚本说明](../../scripts/README.md#anland-kde-安装器)。

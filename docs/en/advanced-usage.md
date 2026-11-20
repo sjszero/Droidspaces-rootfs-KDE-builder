@@ -13,6 +13,8 @@ droidspaces-tui
 
 See the [script guide](../../scripts/README_english.md#droidspaces-tui) for download sources, integrity checks, cache management, updates, and uninstall behavior.
 
+The main menu contains `[1] Mesa + VA-API`, `[2] Anland`, `[3] Hangover Wine`, and `[4] Wine fonts`. The Mesa page has a `[5] Video codecs` submenu for driver updates, removal, and live monitoring of codec, hardware status, processing size, and output FPS. Missing driver telemetry is reported as unknown. Press `q`, `Esc`, or `Ctrl+C` to exit the monitor and return to the menu.
+
 ## USB device management
 
 All distributions include [Droidspaces USB Manager](https://github.com/Yizhou147/Droidspaces-USB-Manager). Enable hardware access for the container in Droidspaces, then launch it from the application menu or run this in KDE:
@@ -35,7 +37,9 @@ It does not run during build or container startup. Dependencies and processing d
 
 ## Local builds
 
-Local builds require Docker, Docker Buildx, and `xz`. Cross-architecture builds also need a working QEMU/binfmt environment.
+Local builds require Docker, Docker Buildx, `xz`, and the TUI downloader tools: Bash, curl, GNU coreutils, and `flock` from util-linux. Cross-architecture builds also need a working QEMU/binfmt environment. The build entry points fetch and verify the current `Gold-bug-tui` release automatically.
+
+TUI downloads use GitHub by default. Run `export DROIDSPACES_TUI_SOURCE=cnb` before building to use CNB. See the [script guide](../../scripts/README_english.md#tui-downloads-and-maintenance) for download and verification commands.
 
 Native architecture example:
 
@@ -63,10 +67,10 @@ The output name resembles `Ubuntu-26-kde-Wayland-Droidspaces-rootfs-aarch64-loca
 
 ## Limitations
 
-- Anland Wayland is supported on Debian 13, Ubuntu 26, Fedora 43/44, and Arch; Arch KDE is Wayland-only, while Ubuntu 24/25 use X11.
-- GNOME is available on Debian 13, Ubuntu 26, Fedora 43/44, and Arch Linux ARM with Anland Wayland.
+- Anland Wayland is supported on Debian 13, Ubuntu 26, Fedora 43/44/45, and Arch; KDE on Fedora 45 and Arch uses Wayland, while Ubuntu 24/25 use X11.
+- GNOME is available on Debian 13, Ubuntu 26, Fedora 43/44/45, and Arch Linux ARM with Anland Wayland.
 - KDE Mobile and Anland Next are available only on supported Wayland targets.
-- Niri, Hyprland, Mango, and Denial are available on Debian 13, Ubuntu 26, Fedora 43/44, and Arch Linux ARM with Anland Wayland.
+- Niri, Hyprland, Mango, and Denial are available on Debian 13, Ubuntu 26, Fedora 43/44/45, and Arch Linux ARM with Anland Wayland.
 - Fedora may need hardware access on some devices. Debian/Ubuntu may lag when `noseccomp` is disabled or the host kernel lacks `USER_NS`.
 - This project's QEMU/binfmt cross-architecture path is not currently recommended for Arch.
 
