@@ -78,36 +78,33 @@ RUN set -eux; \
 # files, sudoers and home are wired to it) and add the requested one alongside.
 ARG ARMADA_USER=armada
 
-# --- 1. Droidspaces userspace tooling -------------------------------------
-# These are the same helper scripts every other template installs. Only the
-# container-relevant ones are copied; desktop installers (install-desktop,
-# install-anland-*, configure-desktop) are meaningless here because the desktop
-# already comes from the armada image.
-COPY scripts/install-usb-manager.sh /usr/local/sbin/install-droidspaces-usb-manager
-COPY scripts/systemd257.sh /usr/local/sbin/systemd257
-COPY scripts/tui/droidspaces-tui.sh /usr/local/bin/droidspaces-tui
-COPY scripts/install-anland-desktop.sh /usr/local/sbin/install-anland-desktop
-# The exception to the rule above: the armada image's own KWin has no Anland
-# backend, so desktop mode needs this installer run at build time (see the
-# DISPLAY_BACKEND=anland-wayland block further down), not just copied for the
-# user to invoke later.
-COPY scripts/tui/install-anland-kde.sh /usr/local/sbin/install-anland-kde
-COPY scripts/tui/install-mesa.sh /usr/local/sbin/install-mesa
-COPY scripts/etc/wireplumber/wireplumber.conf.d/Anland-Audio.conf /tmp/Anland-Audio.conf
-RUN if [ "$DISPLAY_BACKEND" = "anland-wayland" ]; then \
-        install -D -m 0644 /tmp/Anland-Audio.conf /etc/wireplumber/wireplumber.conf.d/Anland-Audio.conf; \
-    fi && \
-    rm -f /tmp/Anland-Audio.conf
+# --- 0. Package policy ----------------------------------------------------
+# Same policy as the Fedora/Debian templates: keep every translation an RPM
+# carries (Fedora images otherwise filter them to en_US, which broke the Chinese
+# UI of in-container installs such as fcitx5), and give dnf the same defaults.
+RUN mkdir -p /etc/rpm && \
+    echo '%_install_langs all' > /etc/rpm/macros.image-language-conf && \
+    { grep -qx 'max_parallel_downloads=10' /etc/dnf/dnf.conf || echo 'max_parallel_downloads=10' >> /etc/dnf/dnf.conf; } && \
+    { grep -qx 'fastestmirror=True' /etc/dnf/dnf.conf || echo 'fastestmirror=True' >> /etc/dnf/dnf.conf; } && \
+    { grep -qx 'defaultyes=True' /etc/dnf/dnf.conf || echo 'defaultyes=True' >> /etc/dnf/dnf.conf; }
 
-# ArmadaOS is an ostree/bootc image: /etc and /usr are read-only by default and
-# several paths are symlinks into /usr. rpm/dnf writes need mutable paths.
-RUN chmod +x /usr/local/sbin/install-droidspaces-usb-manager \
-             /usr/local/bin/droidspaces-tui \
-             /usr/local/sbin/install-anland-desktop \
-             /usr/local/sbin/install-anland-kde \
-             /usr/local/sbin/install-mesa && \
-    ln -sf droidspaces-tui /usr/local/bin/dstui && \
-    ln -sf droidspaces-tui /usr/local/bin/ds-tui
+# --- 1. Droidspaces userspace tooling -------------------------------------
+# The component set comes from the current TUI release, not from copies kept in
+# this repository: sync-tui.sh downloads and verifies the bundle, the build hands
+# it over as the droidspaces-tui build context, and install-rootfs-tools.sh
+# decides what an ArmadaOS target needs (TUI, GPU/video helpers, the anland
+# installers the KDE/anland paths call later, USB manager, systemd257, fcitx5).
+RUN --mount=type=bind,source=scripts,target=/run/droidspaces-scripts \
+    --mount=type=bind,from=droidspaces-tui,target=/run/droidspaces-tui \
+    bash /run/droidspaces-scripts/install-rootfs-tools.sh \
+        --tui-dir /run/droidspaces-tui \
+        --desktop kde \
+        --display-backend "${DISPLAY_BACKEND:-x11}"
+
+# The TUI release does not map armada* to fedora 44 yet, and patching it here would
+# be undone by every in-container TUI update, so that fix goes upstream instead.
+# Until it lands the TUI greys out component actions in this container, while
+# install-rootfs-tools.sh (which does accept armada) keeps the image installable.
 
 # --- 2. Strip boot-only state ---------------------------------------------
 # A bootc image carries the OSTree deployment, kernel, initramfs, EFI payloads
@@ -219,6 +216,8 @@ RUN set -eux; \
         flatpak-add-fedora-repos.service \
         armada-save-devcoredump@.service \
         armada-guestos.service \
+        armada-steam-bridge-guard.service \
+        armada-usb-network.service \
         bluetooth.service; do \
         ln -sf /dev/null "/etc/systemd/system/${unit}"; \
     done; \
@@ -230,6 +229,39 @@ RUN set -eux; \
         armada-steam-charging-eta.service; do \
         ln -sf /dev/null "/etc/systemd/user/${unit}"; \
     done
+
+# --- 2b. Drop FEX and Waydroid ---------------------------------------------
+# FEX ships a 1.3 GB x86 rootfs plus binfmt handlers that fight box64 for the
+# same ELF, and Waydroid needs binder, lxc networking and a kernel this container
+# does not have, so neither can work here. x86-64 games run on box64 instead.
+# Their helper units are removed with them; the two units above are masked
+# because they only ever served those packages.
+RUN set -eux; \
+    dnf -y remove \
+        fex-emu fex-emu-filesystem fex-emu-thunks fex-emu-utils fex-emu-devel \
+        waydroid waydroid-selinux || true; \
+    rm -rf /usr/share/fex-emu /usr/lib64/fex-emu /usr/include/FEXCore \
+        /usr/share/guestos /usr/share/armada/fex-profiles.json \
+        /usr/share/armada/waydroid /var/lib/waydroid \
+        /usr/libexec/armada/armada-guestos-mount \
+        /usr/libexec/armada/waydroid-input-setup \
+        /usr/libexec/armada/waydroid-mesa-overlay \
+        /usr/lib/systemd/system/waydroid-container.service.d \
+        /etc/xdg/menus/applications-merged/waydroid.menu; \
+    rm -f /usr/share/applications/Waydroid.desktop \
+        /usr/share/applications/kcm_waydroidintegration.desktop \
+        /usr/share/applications/waydroid.market.desktop \
+        /usr/share/applications/waydroid.app.install.desktop \
+        /usr/share/desktop-directories/waydroid.directory; \
+    dnf -y clean all
+
+# armada-control still speaks FEX: the Compatibility tab offers FEX presets and
+# the launch wrapper wrote a FEX config per game. Hand both over to box64 — the
+# profiles become BOX64_DYNAREC_* sets and the wrapper generates a per-game
+# rcfile (BOX64_RCFILE), because box64 reads rcfiles before the environment.
+COPY scripts/armada/port-fex-to-box64.py /tmp/port-fex-to-box64.py
+RUN python3 /tmp/port-fex-to-box64.py && \
+    rm -f /tmp/port-fex-to-box64.py
 
 # sddm, seatd, armada-control and armada-session-default are deliberately NOT
 # masked. SDDM is the component that actually starts the graphical session here:

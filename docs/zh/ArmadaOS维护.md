@@ -891,3 +891,58 @@ anland 自带的这份，按 `--fuzz=0` 整条应用。第一版重基踩到一�
 - 有意新增 `mesa-libgbm-devel`（钉 `26.2.6`）与系统级 git 代理、`safe.directory` 配置。
 - HDR 的端到端功能（APP 控制 10bit 输出、桌面亮度、内容增益）需 APP 侧触发，不在本次验证范围内；
   本次证明的是代码进入二进制、构建与安装链路完好。
+
+## 2026-11-21 新镜像收尾：单元、TUI 组件、FEX/Waydroid 清理
+
+新编译的 ArmadaOS-Freedom 环境（`20261119.be6fc78`，`/etc/os-release` 里 `ID=armada`）有三个问题，
+都在容器内实测后一并修回仓库：
+
+### 1. 两个开机失败单元
+| 单元 | 真实原因 | 处理 |
+|---|---|---|
+| `armada-usb-network.service` | `modprobe: FATAL: Module libcomposite not found in /lib/modules/6.1.25-sjszero` —— 容器里没有内核模块可加载 | mask |
+| `armada-steam-bridge-guard.service` | `netlink: cache initialization failed: Invalid argument` + `failed to install the nftables guard (NF_TABLES_INET?)` —— 容器命名空间里建不了 `inet` 表 | mask |
+
+两者都是“依赖真实内核能力”的服务，和 `armada-guestos.service` 同类，进镜像的 mask 列表；
+容器内 mask 后要 `systemctl reset-failed` 才会从 `--failed` 里消失。
+
+### 2. TUI 组件改为跟发布包走
+镜像原来只从仓库 `COPY` 三个 TUI 文件（`droidspaces-tui.sh`、`install-anland-kde.sh`、`install-mesa.sh`），
+比发布包旧一代，且容器里 `/usr/local/sbin` 只有 4 个脚本。现在改成其他模板的同一套机制：
+`sync-tui.sh` 下载并校验 `Gold-bug-tui` 发布包（当前 revision `7c148a70`，TUI 1.8），构建把它作为
+`droidspaces-tui` build context 传进去，`install-rootfs-tools.sh --tui-dir` 决定装什么。
+容器内实测装了 21 个组件（TUI、GPU/视频脚本、6 个 anland 安装器 + `install-anland-desktop`、
+mesa/hangover-wine/winefonts、USB 管理器、systemd257、fcitx5、configure-*、`lib/*.sh`）。
+
+`install-rootfs-tools.sh` 只认 `debian|fedora|arch|...`，`ID=armada` 会直接 `die`，因此补上
+`armada)` 分支（本仓库与发布流程共用）。
+
+发布包里的 TUI 不认识 `armada*`，会让所有支持判断落到 “unsupported”。镜像里**不再**打补丁：
+容器内 TUI 每次自我更新都会把补丁顶掉，所以这一处改由上游支持（等 TUI 自己把 `armada*`
+按 `fedora:44` 处理）。这意味着在补丁落地前，容器里 TUI 的组件动作是灰的，但
+`install-rootfs-tools.sh` 已接受 `armada`，镜像本身仍能正常装出全部组件。
+
+### 3. FEX 与 Waydroid 移除，FEX 脚本改接 box64
+- 删包：`fex-emu{,-filesystem,-thunks,-utils,-devel}`（`/usr/share/fex-emu` 1.3 GB rootfs）
+  与 `waydroid{,-selinux}`；dnf 连带清掉的依赖（lxc、dnsmasq、wget2、gbinder）在容器内确认无人引用。
+- 删残留：`/usr/lib64/fex-emu`、`/usr/include/FEXCore`、`/usr/share/guestos`、
+  `/usr/share/armada/{fex-profiles.json,waydroid}`、`/var/lib/waydroid`、`armada-guestos-mount`、
+  waydroid 的 input/mesa 脚本与桌面项、`waydroid-container.service.d`。
+- box64 接手：`armada-control` 的兼容性页原来读写 FEX 预设（`/usr/share/armada/fex-profiles.json`），
+  `armada-game-launch` 原来给每个游戏写 FEX 配置（`FEX_APP_CONFIG`）。现在预设换成
+  `/usr/share/armada/box64-profiles.json`（default/fast/compatible → `BOX64_DYNAREC_*`），
+  启动包装器改为生成 per-game rcfile 并设 `BOX64_RCFILE`——box64 的 rcfile 优先级高于环境变量，
+  光导出 `BOX64_DYNAREC_*` 会被系统 rcfile 覆盖。旧键名（`fexProfile`/`fexConfig`）继续兼容。
+  实测三种预设生成的 rcfile：`STRONGMEM` 依次 1 / 0 / 2，`SAFEFLAGS` 0 / 0 / 2，
+  每游戏 appid 独立成文件（`570.<pid>.box64rc`），旧键名仍可驱动。
+- 幂等：`scripts/armada/port-fex-to-box64.py` 检测已打过补丁就跳过；在容器里先把插件还原成
+  原始 FEX 版本再跑一遍，产出与手工结果**逐字节相同**，且 `armada-game-launch` 语法编译通过。
+
+### 4. 包策略对齐
+`ArmadaOS.Dockerfile` 补上了其他模板都有的包策略：`/etc/rpm/macros.image-language-conf` 写
+`%_install_langs all`（否则容器内 dnf 新装的 RPM 会把非 en_US 翻译裁掉，fcitx5 这类中文界面
+首当其冲），以及 `max_parallel_downloads=10` / `fastestmirror=True` / `defaultyes=True`。
+写法的幂等：先 `grep -qx` 判存在，避免重复追加。
+
+已知但不处理：`pkg-config gbm` 由上游驱动自带的 `/usr/lib64/pkgconfig/gbm.pc` 提供（不属于任何
+RPM），容器内重建 gamescope 时会看到 `mesa-libgbm-devel` 未安装却能找到 gbm —— 属驱动侧现状，不动。

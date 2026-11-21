@@ -80,6 +80,8 @@ main() {
             install_file nosnap.sh /usr/local/sbin/nosnap
             ;;
         debian|fedora|arch|archarm|archlinux) ;;
+        # ArmadaOS-Freedom reports ID=armada on a Fedora 44 userland.
+        armada) ;;
         *) die "unsupported target distribution: $ID" ;;
     esac
     case "$ID" in
