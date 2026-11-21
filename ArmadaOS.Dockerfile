@@ -1707,13 +1707,18 @@ EOF_RUN
 # Qualcomm hardware. Without the patch the overlay shows GPU clock/load/temperature
 # as 0 and has no cpu_power. The patch lives in this repo.
 #
+# The same patch also pins mangoapp to the X11 platform: gamescope only
+# composites the overlay when the window is tagged through X11
+# (GAMESCOPE_EXTERNAL_OVERLAY on glfwGetX11Window), and GLFW 3.4 would otherwise
+# pick Wayland inside the Wayland session, which leaves the HUD invisible.
+#
 # The source is taken from upstream rather than from armada's own MangoHud
 # package: armada ships a fork with nine patches of its own, which made this step
 # depend on the armada tree and pulled in a build that only works on bare metal.
 # MANGOHUD_COMMIT pins the exact upstream revision the patch was written against,
 # so a new upstream commit cannot silently change what this image ships. Bump it
 # together with the patch.
-ARG MANGOHUD_COMMIT=791f92016625c866323b35d01da3844531b6c237
+ARG MANGOHUD_COMMIT=199227b197455f8099d5ffef688bfee875e62efc
 COPY scripts/armada/mangohud/mangohud-container-metrics.patch /tmp/mangohud-container-metrics.patch
 COPY scripts/armada/mangohud/build-mangohud-container.sh /usr/local/sbin/build-mangohud-container
 COPY scripts/armada/mangohud/mangohud-energy-model.service /usr/lib/systemd/system/mangohud-energy-model.service
@@ -2078,6 +2083,23 @@ rm -rf /var/cache/dnf/* /var/cache/libdnf5/* 2>/dev/null || true
 # The installed compositor must still work without the compiler stack.
 /usr/bin/gamescope --help >/dev/null
 EOF_RUN
+
+# The session script is owned by terra-gamescope, which 9a just installed, so the
+# MangoHud wiring is applied here and not in 8d: patching it before that install
+# would simply be overwritten. Two things happen:
+#   * gamescope gets --mangoapp, so the overlay is spawned and composited by the
+#     session instead of relying on mangohud being wrapped around every game. That
+#     is what makes the HUD show up in the Steam UI as well as in games.
+#   * the performance overlay levels point at the tuned presets file, because
+#     Steam only writes `preset=N` into MANGOHUD_CONFIGFILE and nothing else.
+COPY scripts/armada/mangohud/presets.conf /usr/share/mangohud/presets.conf
+COPY scripts/armada/mangohud/gamescope-session-mangoapp.patch /tmp/gamescope-session-mangoapp.patch
+RUN set -eux; \
+    patch -p1 --batch --fuzz=0 -d / < /tmp/gamescope-session-mangoapp.patch; \
+    bash -n /usr/share/gamescope-session-plus/gamescope-session-plus; \
+    grep -q -- '--mangoapp' /usr/share/gamescope-session-plus/gamescope-session-plus; \
+    grep -q 'MANGOHUD_PRESETSFILE' /usr/share/gamescope-session-plus/gamescope-session-plus; \
+    rm -f /tmp/gamescope-session-mangoapp.patch
 
 # 9b. Rebuild entrypoint.
 # The anland tree stays so gamescope can be rebuilt inside a running container.

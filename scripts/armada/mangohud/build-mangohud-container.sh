@@ -20,7 +20,15 @@
 # -------------
 #   network (first run)          upstream tarball + meson subprojects
 #
-# Everything is cached under $CACHE so later runs work offline.
+# Everything the build needs lives under one workspace, $CACHE, so later runs
+# work offline and nothing is installed on the host:
+#
+#   $CACHE/src                upstream checkout (clone, or $MANGOHUD_SOURCE)
+#   $CACHE/subprojects        meson wrap downloads (MESON_PACKAGE_CACHE_DIR)
+#   $CACHE/deps               private dependency prefix for unpacked -devel files
+#   $CACHE/rpmbuild           rpmbuild tree, source tarball and build log
+#
+# Set CACHE to keep that workspace anywhere, e.g. CACHE=$HOME/mangohud-build.
 #
 # Two host quirks this script works around, both documented so they are not
 # rediscovered the hard way:
@@ -49,6 +57,15 @@
 #   --keep      keep the build tree
 #   --dry-run   resolve inputs and print the plan, build nothing
 #   --install   dnf-install the resulting RPM (replacing the installed one)
+#
+# Environment:
+#   CACHE              build workspace, see above (default under ~/.cache)
+#   MANGOHUD_COMMIT    upstream commit to build; defaults to $MANGOHUD_SOURCE's
+#                      HEAD when a local checkout is used
+#   MANGOHUD_SOURCE    build from this local git checkout instead of cloning
+#   DOWNLOAD_PROXY     URL prefix retried after each direct subproject URL,
+#                      e.g. DOWNLOAD_PROXY=https://gh.monlor.com/
+#   PATCH              container metrics patch to apply
 set -euo pipefail
 
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -56,11 +73,16 @@ HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 # /usr/local/sbin while the patch lands in /tmp.
 PATCH=${PATCH:-$HERE/mangohud-container-metrics.patch}
 CACHE=${CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mangohud-container-build}
+# Remember whether the caller pinned a commit; a local source checkout supplies
+# its HEAD when they did not.
+MANGOHUD_COMMIT_EXPLICIT=${MANGOHUD_COMMIT:+1}
 # Pinned upstream commit. Bump it deliberately: the container patch is written
 # against this exact tree, and the build below refuses to start if the patch does
 # not apply cleanly.
-MANGOHUD_COMMIT=${MANGOHUD_COMMIT:-791f92016625c866323b35d01da3844531b6c237}
+MANGOHUD_COMMIT=${MANGOHUD_COMMIT:-199227b197455f8099d5ffef688bfee875e62efc}
 MANGOHUD_REPOSITORY=${MANGOHUD_REPOSITORY:-https://github.com/flightlessmango/MangoHud.git}
+# Optional local checkout to build from; the workspace layout is unchanged.
+MANGOHUD_SOURCE=${MANGOHUD_SOURCE:-}
 JOBS=${JOBS:-$(nproc)}
 VERSION=${VERSION:-}
 KEEP=0
@@ -92,6 +114,7 @@ log "commit        : $MANGOHUD_COMMIT"
 log "version       : ${VERSION:-<from meson.build>}"
 log "container     : $(basename "$PATCH")"
 log "cache         : $CACHE"
+log "deps prefix   : $CACHE/deps"
 
 if (( DRY_RUN )); then
     log "dry run: nothing built"
@@ -154,17 +177,31 @@ prepare_glfw() {
     rm -rf "$x"; mkdir -p "$x"
     ( cd "$x" && rpm2cpio "$rpm" | cpio -idm --quiet ) || die "cannot extract $rpm"
 
-    need_root
-    install -d /usr/include/GLFW
-    install -m644 "$x"/usr/include/GLFW/*.h /usr/include/GLFW/
-    install -m644 "$x"/usr/lib64/pkgconfig/glfw3.pc /usr/lib64/pkgconfig/
-    # glfw-devel normally provides this unversioned symlink; the runtime package
-    # only ships libglfw.so.3.
+    # The files go into a private prefix instead of /usr: the host stays
+    # untouched, no root is needed, and the build finds them through
+    # PKG_CONFIG_PATH/CFLAGS/LDFLAGS below.
+    DEPS_DIR=$CACHE/deps
+    rm -rf "$DEPS_DIR"
+    install -d "$DEPS_DIR/include/GLFW" "$DEPS_DIR/lib64/pkgconfig" "$DEPS_DIR/lib64"
+    install -m644 "$x"/usr/include/GLFW/*.h "$DEPS_DIR/include/GLFW/"
+    # glfw-devel normally provides the unversioned linker symlink; the runtime
+    # package only ships libglfw.so.3, so the link is created inside the prefix.
     local so
     so=$(find /usr/lib64 -maxdepth 1 -name 'libglfw.so.3.*' | head -1)
     [[ -n $so ]] || die "glfw runtime library not found; install the 'glfw' package"
-    ln -sf "$(basename "$so")" /usr/lib64/libglfw.so
-    log "installed glfw3 development files (mesa untouched)"
+    ln -sf "$so" "$DEPS_DIR/lib64/libglfw.so"
+    # glfw3.pc hard-codes prefix=/usr, so rewrite the three paths that matter to
+    # point at the private prefix.
+    sed -e "s@^prefix=.*@prefix=$DEPS_DIR@" \
+        -e "s@^exec_prefix=.*@exec_prefix=$DEPS_DIR@" \
+        -e "s@^libdir=.*@libdir=$DEPS_DIR/lib64@" \
+        -e "s@^includedir=.*@includedir=$DEPS_DIR/include@" \
+        "$x"/usr/lib64/pkgconfig/glfw3.pc > "$DEPS_DIR/lib64/pkgconfig/glfw3.pc"
+    export PKG_CONFIG_PATH="$DEPS_DIR/lib64/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    export CFLAGS="-I$DEPS_DIR/include${CFLAGS:+ $CFLAGS}"
+    export CXXFLAGS="-I$DEPS_DIR/include${CXXFLAGS:+ $CXXFLAGS}"
+    export LDFLAGS="-L$DEPS_DIR/lib64${LDFLAGS:+ $LDFLAGS}"
+    log "glfw3 development files unpacked into $DEPS_DIR (host untouched, no root needed)"
 }
 
 prepare_deps() {
@@ -210,25 +247,41 @@ SRC=$CACHE/src
 # A shallow clone at the pinned commit. Upstream tarballs are named after the
 # release tag, but the pin is a commit past v0.8.4, so the repository is the only
 # source that matches MANGOHUD_COMMIT exactly.
-if [[ ! -d $SRC/.git ]]; then
-    rm -rf "$SRC"
-    log "cloning MangoHud"
-    git clone --quiet --filter=blob:none --no-checkout \
-        "$MANGOHUD_REPOSITORY" "$SRC" || die "cannot clone $MANGOHUD_REPOSITORY"
+LOCAL_SOURCE=0
+if [[ -n $MANGOHUD_SOURCE ]]; then
+    # Build straight from a working checkout: the workspace (deps, subprojects,
+    # rpmbuild) stays independent of it, and the tree itself is only read.
+    SRC=$(cd -- "$MANGOHUD_SOURCE" && pwd -P) || die "no such checkout: $MANGOHUD_SOURCE"
+    [[ -d $SRC/.git ]] || die "not a git checkout: $SRC"
+    LOCAL_SOURCE=1
+    if [[ -z ${MANGOHUD_COMMIT_EXPLICIT:-} ]]; then
+        MANGOHUD_COMMIT=$(git -C "$SRC" rev-parse HEAD) || die "cannot read HEAD of $SRC"
+    fi
+    git -C "$SRC" cat-file -e "$MANGOHUD_COMMIT^{commit}" 2>/dev/null ||
+        die "$SRC does not contain $MANGOHUD_COMMIT"
+    log "source        : local checkout $SRC"
+else
+    if [[ ! -d $SRC/.git ]]; then
+        rm -rf "$SRC"
+        log "cloning MangoHud"
+        git clone --quiet --filter=blob:none --no-checkout \
+            "$MANGOHUD_REPOSITORY" "$SRC" || die "cannot clone $MANGOHUD_REPOSITORY"
+    fi
+    if ! git -C "$SRC" cat-file -e "$MANGOHUD_COMMIT^{commit}" 2>/dev/null; then
+        log "fetching pinned commit"
+        git -C "$SRC" fetch --quiet origin "$MANGOHUD_COMMIT" ||
+            git -C "$SRC" fetch --quiet origin || die "cannot fetch from $MANGOHUD_REPOSITORY"
+    fi
+    git -C "$SRC" checkout --quiet --force "$MANGOHUD_COMMIT" || die "cannot check out $MANGOHUD_COMMIT"
+    git -C "$SRC" clean -xdfq
 fi
-if ! git -C "$SRC" cat-file -e "$MANGOHUD_COMMIT^{commit}" 2>/dev/null; then
-    log "fetching pinned commit"
-    git -C "$SRC" fetch --quiet origin "$MANGOHUD_COMMIT" ||
-        git -C "$SRC" fetch --quiet origin || die "cannot fetch from $MANGOHUD_REPOSITORY"
-fi
-git -C "$SRC" checkout --quiet --force "$MANGOHUD_COMMIT" || die "cannot check out $MANGOHUD_COMMIT"
-git -C "$SRC" clean -xdfq
-log "checkout $(git -C "$SRC" rev-parse --short HEAD)"
+log "checkout $(git -C "$SRC" rev-parse --short "$MANGOHUD_COMMIT")"
 
 # Only read the version out of the source when the caller did not pin one.
 if [[ -z $VERSION ]]; then
-    VERSION=$(sed -n "s/^  version : 'v\{0,1\}\([^']*\)',/\1/p" "$SRC/meson.build" | head -1)
-    [[ -n $VERSION ]] || die "cannot determine version from $SRC/meson.build"
+    VERSION=$(git -C "$SRC" show "$MANGOHUD_COMMIT:meson.build" |
+        sed -n "s/^  version : 'v\{0,1\}\([^']*\)',/\1/p" | head -1)
+    [[ -n $VERSION ]] || die "cannot determine version from $MANGOHUD_COMMIT"
 fi
 
 # The spec sets %global __meson_wrap_mode default, so meson fetches the wraps
@@ -253,16 +306,25 @@ fetch() {   # fetch <filename> <expected-sha256> <url> [fallback-url...]
         return 0
     fi
     rm -f "$dest"
-    local url attempt
+    # Every direct URL is retried through $DOWNLOAD_PROXY when it is set, which is
+    # what makes this work on hosts that cannot reach github.com directly. The
+    # checksum is what decides, so a mirror serving something else still fails.
+    local -a candidates=()
+    local url
     for url in "$@"; do
+        candidates+=("$url")
+        [[ -z ${DOWNLOAD_PROXY:-} ]] || candidates+=("$DOWNLOAD_PROXY$url")
+    done
+    local candidate attempt
+    for candidate in "${candidates[@]}"; do
         for attempt in 1 2 3; do
             log "downloading $name (attempt $attempt)"
-            if timeout 300 curl -fsSL -o "$dest.part" "$url"; then
+            if timeout 300 curl -fsSL -o "$dest.part" "$candidate"; then
                 if printf '%s  %s\n' "$hash" "$dest.part" | sha256sum -c --status -; then
                     mv -f "$dest.part" "$dest"
                     return 0
                 fi
-                log "checksum mismatch for $name from $url, retrying"
+                log "checksum mismatch for $name from $candidate, retrying"
             fi
             sleep $(( attempt * 3 ))
         done
@@ -436,7 +498,11 @@ rpm -qip "$RPM" 2>/dev/null | sed -n '1,4p' | sed 's/^/[mangohud]   /'
 if (( DO_INSTALL )); then
     need_root
     log "installing $RPM"
-    dnf install -y --allowerasing "$RPM" >/dev/null 2>&1 ||
+    # An unchanged NEVR makes `dnf install` a no-op, which silently kept the old
+    # libraries on disk after a rebuild. Force the files in first; dnf stays as
+    # the fallback that can still resolve a dependency change.
+    rpm -Uvh --replacepkgs --oldpackage "$RPM" >/dev/null 2>&1 ||
+        dnf install -y --allowerasing "$RPM" >/dev/null 2>&1 ||
         dnf reinstall -y "$RPM" >/dev/null 2>&1 ||
         die "installation failed"
     rpm -q mangohud

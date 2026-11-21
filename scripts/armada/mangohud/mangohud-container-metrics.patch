@@ -1,3 +1,14 @@
+# Container patches for MangoHud, all applied to one pinned upstream commit.
+#
+#   mangohud-next/server/metrics/hwmon.cpp, src/cpu.cpp, src/cpu.h
+#       Metrics the container can actually read: kgsl sensors without hwmon, and
+#       cpu_power from the kernel energy model.
+#   src/app/main.cpp
+#       mangoapp must talk to gamescope over X11 for the overlay to be composited;
+#       GLFW 3.4 would otherwise choose Wayland and the HUD stays invisible.
+#   src/overlay_params.cpp
+#       Accept Steam's nis_steam_sharpness key instead of logging it as unknown
+#       on every config reload (the overlay only models the FSR offset).
 diff --git a/mangohud-next/server/metrics/hwmon.cpp b/mangohud-next/server/metrics/hwmon.cpp
 index 4500a13..961a7f5 100644
 --- a/mangohud-next/server/metrics/hwmon.cpp
@@ -302,3 +313,36 @@ index d904f4a..41fd3fd 100644
  
  class CPUStats
  {
+--- a/src/app/main.cpp
++++ b/src/app/main.cpp
+@@ -529,6 +529,13 @@
+ 
+     // Setup window
+     glfwSetErrorCallback(glfw_error_callback);
++    // gamescope only composites mangoapp as an overlay when the window is tagged
++    // through X11 (GAMESCOPE_EXTERNAL_OVERLAY on glfwGetX11Window in init()).
++    // GLFW 3.4 prefers the Wayland platform in a Wayland session, which makes
++    // those X11 calls return NULL and leaves the HUD invisible, so select X11
++    // explicitly whenever a display is available.
++    if (getenv("DISPLAY"))
++        glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+     if (!glfwInit())
+         return 1;
+ 
+diff --git a/src/overlay_params.cpp b/src/overlay_params.cpp
+--- a/src/overlay_params.cpp
++++ b/src/overlay_params.cpp
+@@ -790,6 +790,13 @@
+       if (it.first == "preset") {
+          continue; // Handled above
+       }
++      // Steam writes nis_steam_sharpness next to fsr_steam_sharpness. MangoHud
++      // only models the FSR offset it subtracts from the gamescope message, so
++      // accept the key and drop it instead of logging it as unknown on every
++      // config reload (Steam rewrites the file whenever the overlay level moves).
++      if (it.first == "nis_steam_sharpness") {
++         continue;
++      }
+       SPDLOG_ERROR("Unknown option '{}'", it.first.c_str());
+    }
+ }

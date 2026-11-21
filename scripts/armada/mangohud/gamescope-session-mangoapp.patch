@@ -1,0 +1,51 @@
+--- a/usr/share/gamescope-session-plus/gamescope-session-plus
++++ b/usr/share/gamescope-session-plus/gamescope-session-plus
+@@ -52,6 +52,13 @@
+ 
+ # Enable Mangoapp
+ export MANGOHUD_CONFIGFILE=$(mktemp /tmp/mangohud.XXXXXXXX)
++
++# Use the tuned overlay levels shipped by the image unless the user already has
++# their own presets file. Steam writes only `preset=N`, so without this every
++# level falls back to MangoHud's built-in defaults.
++if [ -z "${MANGOHUD_PRESETSFILE:-}" ] && [ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/MangoHud/presets.conf" ] && [ -f /usr/share/mangohud/presets.conf ]; then
++	export MANGOHUD_PRESETSFILE=/usr/share/mangohud/presets.conf
++fi
+ 
+ export RADV_FORCE_VRS_CONFIG_FILE=$(mktemp /tmp/radv_vrs.XXXXXXXX)
+ 
+@@ -284,6 +291,14 @@
+ 		export GAMESCOPE_FORCE_VULKAN_REALTIME=1
+ 	fi
+ 	unset _armada_tweaks_config
++	# Let gamescope own the overlay instead of running mangohud on the game:
++	# --mangoapp spawns mangoapp per connector and composites it into the session,
++	# which is what makes the HUD show up both in the Steam UI and in games.
++	# DISABLE_MANGOAPP=1 keeps the old standalone-mangoapp behaviour.
++	MANGOAPP_OPTION=""
++	if [ -z "${DISABLE_MANGOAPP:-}" ] && command -v mangoapp >/dev/null && gamescope_has_option "--mangoapp"; then
++		MANGOAPP_OPTION="--mangoapp"
++	fi
+ 
+ 	GAMESCOPECMD="$(get_gamescope_binary) \
+ 		$CURSOR \
+@@ -307,6 +322,7 @@
+ 		--default-touch-mode $TOUCH_MODE \
+ 		--hide-cursor-delay $HIDE_CURSOR_DELAY_MS \
+ 		--fade-out-duration $FADE_OUT_DURATION_MS \
++		$MANGOAPP_OPTION \
+ 		--steam"
+ fi
+ 
+@@ -364,8 +380,9 @@
+ 	/usr/bin/ibus-daemon -d -r --panel=disable --emoji-extension=disable
+ fi
+ 
+-# If we have mangoapp binary start it
+-if command -v mangoapp >/dev/null; then
++# Start mangoapp ourselves only when gamescope is not doing it, otherwise two
++# instances fight over the same stats stream and the overlay stays blank.
++if [ -z "${MANGOAPP_OPTION:-}" ] && command -v mangoapp >/dev/null; then
+ 	(while true; do
+ 		mangoapp
+ 	done) &
