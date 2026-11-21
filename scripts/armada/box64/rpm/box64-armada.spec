@@ -115,6 +115,20 @@ if [ -f /etc/systemd/system/box64-binfmt.service ] &&
    ! rpm -qf /etc/systemd/system/box64-binfmt.service >/dev/null 2>&1; then
     rm -f /etc/systemd/system/box64-binfmt.service
 fi
+# The image also deploys box64 through update-alternatives (build-box64.sh puts a
+# versioned binary under /usr/local/libexec/box64 and points /usr/bin/box64 at it).
+# Once this package owns /usr/bin/box64 that link is a leftover, and a later
+# `update-alternatives --set box64 ...` would silently swap the packaged binary
+# for the stale copy. Only removed when no package owns the link and it really
+# points into the old per-version directory.
+if [ -L /etc/alternatives/box64 ] && ! rpm -qf /etc/alternatives/box64 >/dev/null 2>&1; then
+    case $(readlink -f /etc/alternatives/box64 2>/dev/null || true) in
+        /usr/local/libexec/box64/*)
+            rm -f /etc/alternatives/box64
+            echo "box64-armada: removed the stale update-alternatives link for box64"
+            ;;
+    esac
+fi
 systemctl daemon-reload >/dev/null 2>&1 || :
 systemctl enable box64-binfmt.service >/dev/null 2>&1 || :
 # The unit drops and re-adds the handler, which is also how an upgrade switches
