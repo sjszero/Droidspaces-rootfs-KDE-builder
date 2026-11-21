@@ -57,7 +57,7 @@ bash -n scripts/armada/as-user.sh
 
 修复采用其他容器共用的 `mesa-for-android-container` 驱动：
 
-- `scripts/tui/install-mesa.sh` 将 `ID=armada` 按 `VERSION_ID` 映射到相应 Fedora 目标，不修改系统的 `/etc/os-release`。
+- `install-mesa`（源自 `Gold-bug-tui` 发布包；仓库内的 `scripts/tui/` 旧副本已删除）将 `ID=armada` 按 `VERSION_ID` 映射到相应 Fedora 目标，不修改系统的 `/etc/os-release`。
 - `ArmadaOS.Dockerfile` 在最后的软件包事务之后、删除安装器之前，按 `ENABLE_mesa_ARG` 调用共享安装器；驱动随后使用相同的 DNF 锁定机制。
 - 运行容器从同一分发 Release 的 CNB 镜像安装了 `mesa-for-android-container_26.3.0-devel-20260824_fedora_44_arm64.tar.gz` 与媒体解码驱动，下载校验沿用共享安装器。
 - Gold 的 Steam 路径指向 armada 的预装数据，原目录仍归 UID 1000 所有。构建脚本现在将共享的 `.local/share/Steam` 和 `.steam` 实体目录归给所选图形用户，使 Steam 能写入和更新；此共享客户端由该用户维护。运行容器已应用相同修复，并将旧归属快照保存到 `~/.cache/armada-driver-maintenance/steam-ownership.jsonl`。
@@ -916,6 +916,15 @@ mesa/hangover-wine/winefonts、USB 管理器、systemd257、fcitx5、configure-*
 
 `install-rootfs-tools.sh` 只认 `debian|fedora|arch|...`，`ID=armada` 会直接 `die`，因此补上
 `armada)` 分支（本仓库与发布流程共用）。
+
+仓库里原本还留着 `scripts/tui/` 的三个旧副本（`droidspaces-tui.sh`、`install-anland-kde.sh`、`install-mesa.sh`），
+迁移到发布包后已无任何引用，现已删除。发布包的 `install-mesa` 自己的系统检测仍只按 `ID` 精确匹配，
+`ID=armada` 会被判为 `Unsupported system: ArmadaOS-Freedom ...`；该映射由上游提交 `d4e41c3`
+（`fix(tui): treat armada* as fedora in system detection`）补上。**在 `Gold-bug-tui` 重建到包含该提交之前，
+`ENABLE_mesa_ARG=true` 的构建会在第 12 步失败**。核对办法：发布 manifest 的 `revision=` 应等于或晚于 `d4e41c3`。
+
+构建链只依赖发布包，所以不需要在 Dockerfile 里给 `install-mesa` 打补丁；重发滚动 tag `Gold-bug-tui`
+后 `sync-tui.sh` 会自动拿到新脚本。
 
 发布包里的 TUI 不认识 `armada*`，会让所有支持判断落到 “unsupported”。镜像里**不再**打补丁：
 容器内 TUI 每次自我更新都会把补丁顶掉，所以这一处改由上游支持（等 TUI 自己把 `armada*`

@@ -101,10 +101,12 @@ RUN --mount=type=bind,source=scripts,target=/run/droidspaces-scripts \
         --desktop kde \
         --display-backend "${DISPLAY_BACKEND:-x11}"
 
-# The TUI release does not map armada* to fedora 44 yet, and patching it here would
-# be undone by every in-container TUI update, so that fix goes upstream instead.
-# Until it lands the TUI greys out component actions in this container, while
-# install-rootfs-tools.sh (which does accept armada) keeps the image installable.
+# The TUI's own system detection does not know armada yet: upstream fixed that in
+# d4e41c3, but the rolling Gold-bug-tui release predates the commit, so its UI still
+# greys out component actions here. install-rootfs-tools.sh accepts armada by itself,
+# which is why the image assembles at all; anything bundled that runs its own
+# detection (install-mesa at step 12) needs a rebuilt release. Update this note once
+# the release carries d4e41c3 -- the copies that used to live here are gone on purpose.
 
 # --- 2. Strip boot-only state ---------------------------------------------
 # A bootc image carries the OSTree deployment, kernel, initramfs, EFI payloads
