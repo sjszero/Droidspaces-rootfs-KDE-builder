@@ -68,6 +68,15 @@ export DOTNET_gcServer="${DOTNET_gcServer:-0}"
 # after Steamworks comes up. A larger heap hard limit makes it worse, so both
 # knobs matter and neither may be dropped.
 export DOTNET_gcConcurrent="${DOTNET_gcConcurrent:-0}"
+# Slay the Spire 2 streams a 2 GB pack through that capped heap, so the few-MB
+# default gen0 budget makes GC run constantly. Every GC parks the finalizer
+# thread in the same unlocked DisposablesTracker, and the process aborts with
+# "Disposable not registered" right after the main menu finishes loading (18-21 s
+# in on this box, i.e. the moment Steam stops showing the game as running). A
+# 64 MiB gen0 budget cuts the GC rate enough to stay up for minutes; raising the
+# hard limit to 2 GiB makes it die sooner and forcing dynarec strong memory
+# ordering does not help, both measured on Slay the Spire 2 (appID 2868840).
+export DOTNET_GCgen0size="${DOTNET_GCgen0size:-0x4000000}"
 # .NET's GC depends on real memory ordering. box64's dynarec defaults to a weak
 # model, and the resulting race kills the game in the finalizer thread with
 # "Disposable not registered" a few seconds after Steamworks initialises.
