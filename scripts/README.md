@@ -16,7 +16,8 @@
 | `install-anland-desktop.sh` | RootFS 构建环境 | 根据桌面 slug 分发到 KDE、GNOME、Niri、Hyprland、Mango、Denial 或 Anland Next 安装器。 |
 | `lib/anland-build.sh`、`lib/desktop-config.sh`、`lib/rootfs-config.sh` | RootFS 构建宿主 | 为 native/QEMU 构建解析 Anland 包族、桌面配置和 RootFS 配置；这些是通用构建库。 |
 | `armada/*` | ArmadaOS 构建环境或 Linux 容器 | ArmadaOS 专用的会话/Steam 启动包装器、Decky/splash 配置、构建期补丁和 Anland 验证工具。 |
-| `sync-tui.sh` | 开发与构建环境 | 从 `Gold-bug-tui` Release 下载并解压 TUI 压缩包，校验清单、摘要、大小、归档结构和脚本语法。 |
+| `sync-tui.sh` | 开发与构建环境 | 从 `Gold-bug-tui` Release 下载并解压 TUI 压缩包，校验清单、摘要、大小、归档结构和脚本语法。仅在 `DROIDSPACES_TUI_SOURCE=github\|cnb` 时使用。 |
+| `fetch-tui-git.sh` | 开发与构建环境 | **默认来源**：按提交从上游 git 树（`Goldzxcbug/droidspaces-package`）下载 `scripts/tui/`，校验必需文件、拒绝符号链接、逐个脚本跑 `bash -n`，并写出带真实 SHA-256 的两份清单。`DROIDSPACES_TUI_REF` 选 ref（默认 `main`），`DROIDSPACES_TUI_ARCHIVE_BASE` 可指向镜像（如 `https://gh.monlor.com/https://github.com`）。 |
 | `install-usb-manager.sh` | Linux 容器 | 安装 Droidspaces USB Manager、发行版依赖、菜单入口和用户权限。 |
 | `systemd257.sh` | RootFS 构建环境 | 在需要时安装由包管理器管控的 systemd 257 完整包族，供旧 Android 内核使用。 |
 | `download-firmware` | Debian/Ubuntu 容器 | 安装并解压 `linux-firmware` 中的 `.zst` 固件。 |
@@ -25,7 +26,7 @@
 | `start/desktop-session.service` | Linux 容器的 systemd | 通过统一入口自动启动所选桌面会话。 |
 | `binfmt/*` | Linux 容器的 systemd/内核 | 检查并挂载 `binfmt_misc`，为 QEMU 跨架构执行做准备。 |
 
-构建入口先运行 `sync-tui.sh` 获取并解压 `Gold-bug-tui.tar.gz`，再将解压目录和 `scripts/` 作为 BuildKit 只读挂载交给 `install-rootfs-tools.sh` 安装。七个 Anland 入口分别保留，共享函数安装到 `/usr/local/lib/droidspaces/tui/`。KDE/KDE Mobile 镜像安装 PipeWire 配置；Anland Wayland 镜像安装 WirePlumber 配置。
+构建入口默认运行 `fetch-tui-git.sh`，按提交从上游 git 树取 `scripts/tui/`，再把该目录和 `scripts/` 作为 BuildKit 只读挂载交给 `install-rootfs-tools.sh` 安装；只有设置 `DROIDSPACES_TUI_SOURCE=github|cnb` 时才改用 `sync-tui.sh` 拉 `Gold-bug-tui` 发布包。滚动发布由人工切版、曾落后上游数天，并因此让发布包里的 `install-mesa` 在 ArmadaOS 上以 `Unsupported system: ArmadaOS-Freedom ...` 中止构建，所以默认不再依赖它。七个 Anland 入口分别保留，共享函数安装到 `/usr/local/lib/droidspaces/tui/`。KDE/KDE Mobile 镜像安装 PipeWire 配置；Anland Wayland 镜像安装 WirePlumber 配置。
 
 镜像内提供 `droidspaces-tui`、`droidspaces-gpu`、`droidspaces-video.sh`，以及 `install-mesa`、`install-hangover-wine`、`install-winefonts` 和各 `install-anland-*` 命令。TUI 与安装器的功能随构建时获取的发布版本提供。
 
@@ -40,10 +41,9 @@ dstui
 ds-tui
 ```
 
-在仓库检出目录中，先下载发布文件再运行：
-
+在仓库检出目录中，先取 TUI 脚本再运行：
 ```bash
-bash scripts/sync-tui.sh --output .build/tui
+bash scripts/fetch-tui-git.sh --output .build/tui
 bash .build/tui/droidspaces-tui.sh
 ```
 
@@ -267,25 +267,41 @@ sudo download-firmware
 
 ## TUI 下载与维护
 
-TUI 源码在 [`droidspaces-package`](https://github.com/Goldzxcbug/droidspaces-package) 仓库维护。RootFS 构建从该仓库的 `Gold-bug-tui` 滚动 Release 获取当前发布。
+TUI 源码在 [`droidspaces-package`](https://github.com/Goldzxcbug/droidspaces-package) 仓库维护。RootFS 构建默认**直接从该仓库的 git 树**按提交取 `scripts/tui/`；`Gold-bug-tui` 滚动 Release 只在显式设置 `DROIDSPACES_TUI_SOURCE=github|cnb` 时使用——它由人工切版，曾落后上游数天，并让发布包里的 `install-mesa` 在 ArmadaOS 上以 `Unsupported system: ArmadaOS-Freedom ...` 中止构建。
 
-在本仓库根目录下载：
+在本仓库根目录取脚本（默认来源，也是构建入口走的路径）：
+
+```bash
+bash scripts/fetch-tui-git.sh --output .build/tui
+```
+
+固定到某个提交，让同一份脚本可复现：
+
+```bash
+bash scripts/fetch-tui-git.sh --output .build/tui --ref 62657d5629a47bee96687b40bec6de3566891b42
+```
+
+github.com 直连不通时，把归档地址指到镜像：
+
+```bash
+DROIDSPACES_TUI_ARCHIVE_BASE=https://gh.monlor.com/https://github.com \
+  bash scripts/fetch-tui-git.sh --output .build/tui
+```
+
+仍要走发布包（GitHub，或 CNB 镜像）：
 
 ```bash
 bash scripts/sync-tui.sh --output .build/tui
-```
-
-使用 CNB 镜像：
-
-```bash
 bash scripts/sync-tui.sh --output .build/tui --source cnb
 ```
 
-下载器使用 Bash、curl、GNU tar/coreutils、gzip 和 util-linux 的 `flock`。先校验发布清单与 `Gold-bug-tui.tar.gz` 的 SHA-256 和大小，再检查归档路径、文件类型、重复条目及展开大小，拒绝链接和目录穿越；解压后按 `Gold-bug-tui-files` 校验各入口与 `lib/*.sh` 的摘要、大小和 Shell 语法。压缩包上限为 32 MiB，展开文件合计上限为 64 MiB，单个脚本上限为 8 MiB，归档最多包含 128 个条目。下载期间发布内容发生变化或校验失败时，构建停止并保留原下载目录。下载产物位于 `.build/tui`，不提交到仓库。
+`fetch-tui-git.sh` 用 Bash、curl、GNU tar/coreutils、gzip 和 coreutils 的 `sha256sum`。它把 ref 解析成提交（有 git 时用 `git ls-remote`，也可直接给 40 位提交号），下载该提交的归档，只取 `scripts/tui/`，拒绝符号链接与 git 元数据，检查 `install-rootfs-tools.sh` 需要的每个入口，对每个 `.sh` 跑 `bash -n`，再按真实 SHA-256 写出 `Gold-bug-tui-manifest` 与 `Gold-bug-tui-files`（`revision=` 记录的就是实际下载的提交）。
 
-native/QEMU 构建入口下载到各自的临时目录，交给 Docker 安装，并在结束后清理。默认使用 GitHub；设置 `DROIDSPACES_TUI_SOURCE=cnb` 可改用 CNB。每次构建查询当前发布；同一 RootFS 仓库提交在不同时间构建时，可能包含不同的 TUI 版本。镜像在 `/usr/local/share/droidspaces-tui/` 保存本次发布清单 `Gold-bug-tui-manifest` 和文件清单 `Gold-bug-tui-files`。离线 `--check` 同时检查两份清单的 revision、库文件以及入口摘要。
+`sync-tui.sh`（发布包路径）使用 Bash、curl、GNU tar/coreutils、gzip 和 util-linux 的 `flock`。先校验发布清单与 `Gold-bug-tui.tar.gz` 的 SHA-256 和大小，再检查归档路径、文件类型、重复条目及展开大小，拒绝链接和目录穿越；解压后按 `Gold-bug-tui-files` 校验各入口与 `lib/*.sh` 的摘要、大小和 Shell 语法。压缩包上限为 32 MiB，展开文件合计上限为 64 MiB，单个脚本上限为 8 MiB，归档最多包含 128 个条目。下载期间发布内容发生变化或校验失败时，构建停止并保留原下载目录。下载产物位于 `.build/tui`，不提交到仓库。
 
-校验已经下载的文件：
+native/QEMU 构建入口把脚本取到各自的临时目录，交给 Docker 安装，并在结束后清理。git 源默认 `main`（用 `DROIDSPACES_TUI_REF` 固定）；发布包源默认 GitHub，`DROIDSPACES_TUI_SOURCE=cnb` 改用 CNB。镜像在 `/usr/local/share/droidspaces-tui/` 保存本次的 `Gold-bug-tui-manifest` 和 `Gold-bug-tui-files`；git 源下这两份清单记录实际提交与每个文件的摘要。`--check` 只适用于发布包下载。
+
+发布包也可以单独校验已下载的文件：
 
 ```bash
 bash scripts/sync-tui.sh --output .build/tui --check

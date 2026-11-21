@@ -141,8 +141,18 @@ echo "========================================================="
 mkdir -p -- "$REPO_DIR/.build" || exit 1
 TUI_DIR="$(mktemp -d "$REPO_DIR/.build/tui.XXXXXXXX")" || exit 1
 trap 'rm -rf -- "$TUI_DIR"; rm -f -- "$TUI_DIR.lock"' EXIT
-if ! bash "$REPO_DIR/scripts/sync-tui.sh" --output "$TUI_DIR" \
-    --source "${DROIDSPACES_TUI_SOURCE:-github}"; then
+# The TUI scripts come from the upstream git tree by default, not from the rolling
+# Gold-bug-tui release: that release is cut by hand and lagged upstream by days, and
+# shipped an install-mesa that aborts on ArmadaOS ("Unsupported system:
+# ArmadaOS-Freedom ..."). Set DROIDSPACES_TUI_SOURCE=github|cnb to build from a
+# release again; DROIDSPACES_TUI_REF (default main) picks the git ref.
+TUI_SOURCE="${DROIDSPACES_TUI_SOURCE:-git}"
+if [ "$TUI_SOURCE" = "git" ]; then
+  if ! bash "$REPO_DIR/scripts/fetch-tui-git.sh" --output "$TUI_DIR"; then
+    exit 1
+  fi
+elif ! bash "$REPO_DIR/scripts/sync-tui.sh" --output "$TUI_DIR" \
+    --source "$TUI_SOURCE"; then
   exit 1
 fi
 
