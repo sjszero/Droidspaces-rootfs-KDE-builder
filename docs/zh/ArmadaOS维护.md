@@ -528,14 +528,14 @@ arm64 客户端把游戏声明的 "Steam Linux Runtime 4" 解析成 arm64 变体
 
 | 组件 | 作用 |
 | --- | --- |
-| `build-box64.sh` | 从上游 pinned commit 编译 box64，strip 后放 `/usr/local/libexec/box64/`，用 alternatives 以优先级 200 接管 `/usr/bin/box64` |
+| `build-box64.sh` | 从上游 pinned commit 编译 box64（含 32 位 BOX32 前端），strip 后放 `/usr/local/libexec/box64/`，并作为普通文件装到 `/usr/bin/box64`（不走 alternatives，避免优先级竞争） |
 | `install-x86-64-libs.sh` | 用 `dnf download --forcearch=x86_64` 取 Fedora 的 x86_64 RPM，提取 `.so*` 到 `/usr/lib/box64-x86_64-linux-gnu`（box64 在 `src/core.c` 里固定搜索的目录） |
-| `box64-binfmt` + `.service` | 挂载 `binfmt_misc` 并注册 box64 作为 x86-64 解释器，开机生效 |
+| `box64-binfmt` + `.service` | 挂载 `binfmt_misc`，然后按 `/usr/lib/binfmt.d/box64.conf` 注册 x86 与 x86-64 两条（`box64-x86_64` / `box64-i386`），开机生效 |
 | `compatibilitytool.vdf` / `toolmanifest.vdf` / `box64-run` | Steam 自定义兼容层，游戏属性里可选 `box64 (Armada)` |
 
 透明运行的证据：不显式调用 box64，直接 `./SlayTheSpire2`，内核 binfmt 接管，GPU 14–15%、窗口 1280×720、locale 与存档加载完成。
 
-`systemd-binfmt` 在本容器里永远不会启动：它是 `static` 且带 `ConditionPathIsMountPoint=/proc/sys/fs/binfmt_misc`，而没有任何东西在开机时挂载那个目录，因此 `binfmt.d` 的条目全部静默失效。自建 oneshot 单元先挂载再注册。FEX 也用 `binfmt.d` 声明 x86-64，`binfmt_misc` 对同一 ELF 的多个 handler 按**注册顺序逆序**择优，所以脚本先 `echo -1 > binfmt_misc/box64` 再重新注册，让结果与启动顺序无关。
+`systemd-binfmt` 在本容器里永远不会启动：它是 `static` 且带 `ConditionPathIsMountPoint=/proc/sys/fs/binfmt_misc`，而没有任何东西在开机时挂载那个目录（实测 `systemctl status` 为 condition unmet），因此 `binfmt.d` 的条目全部静默失效。自建 oneshot 单元先挂载，再按同一个 `/usr/lib/binfmt.d/box64.conf` 注册两条。FEX 声明同样的 ELF magic，`binfmt_misc` 选**最后注册**的 handler（实测），所以 `fex-binfmt on|off` 按 `interpreter` 字段注销 box64 与 FEX 的全部条目（不依赖条目名），再注册要保留的一侧。
 
 ### 三个必须踩过的坑
 
@@ -955,3 +955,31 @@ mesa/hangover-wine/winefonts、USB 管理器、systemd257、fcitx5、configure-*
 
 已知但不处理：`pkg-config gbm` 由上游驱动自带的 `/usr/lib64/pkgconfig/gbm.pc` 提供（不属于任何
 RPM），容器内重建 gamescope 时会看到 `mesa-libgbm-devel` 未安装却能找到 gbm —— 属驱动侧现状，不动。
+
+## 2026-11-22 StS2 的 RitsuLib / BaseLib 在 box64 下恢复 Harmony
+
+### 现象与事实纠正
+StS2（Steam AppID `2868840`）在 box64 下启动时，RitsuLib 的 Harmony patch 曾大批失败。此前「.NET `Process.Modules` 可能走 `dl_iterate_phdr`」的推断有误；直接核对 .NET 9.0.7 源码后确认，Linux 实现调用 `ParseMapsModules`，通过 `File.ReadLines("/proc/self/maps")` 解析进程映射。枚举器要求映射行同时具有 pathname 和包含 `r`、`x` 的权限；box64 旧版对匿名 ELF 段没有可供模块发现的 pathname。
+
+### 修复
+- 新增 `scripts/armada/box64/patches/proc-self-maps.patch`：重写映射快照生成，给命中的匿名 ELF load segment 标注完整 `h->path`；在 box64 的 maps 文件打开包装路径返回该快照。
+- `box64-armada.spec` 升至 Release 2 并应用补丁；`build-rpm.sh` 纳入 patch 文件。`build-box64.sh` 增加幂等补丁应用、检查补丁文件及 Dockerfile 内置 patch 路径回退；`ArmadaOS.Dockerfile` 复制补丁并传给构建脚本。
+- 移除 `box64-run` 中无效的全大写 `MONOMOD_JITPATH` / `MONOMOD_JIT_PATH` 注入。此次验证不改 RitsuLib、BaseLib 或游戏文件。
+
+### 实测证据
+- 独立 .NET 9.0.7 x64 `Process.Modules` 对照：旧 box64 返回码 1，`NAMED_CODE=False JIT_MODULES=0`；新 RPM 解出的 box64 返回码 0，maps 有带完整路径的 `r-xp` 段，`NAMED_CODE=True JIT_MODULES=1`。
+- 用新二进制在现有 Xvfb `:99` 离屏复现 150.9 秒；到观察限时游戏仍存活，退出信号是验证器随后清理时发出的 SIGTERM（`process_exit=-15`，非启动崩溃）。MonoMod 日志有 `Got jit path: .../libclrjit.so` 1 次，`was not loaded in this process` 0 次。
+- RitsuLib 0.6.15 的 436 个核心 patch 全部应用（0 failed）；BaseLib 3.4.8 报 `Applied 286 patches successfully, 0 failed`；日志出现 `Loaded 3 mods (3 total)` 与主菜单加载完成；此轮游戏日志 `[Critical]` 数为 0。
+- RPM `box64-armada-0.4.4-2.fc44.aarch64.rpm`：16,745,876 字节，SHA-256 `a8f0c381b97abe3fd1a79aa2e6b35a8dd68285efb4dbf35ab58f979e75b95ad9`，`rpm -K` 摘要确定；其中 box64 运行横幅确认 v0.4.4 dynarec。`bash -n`、`git diff --check` 均通过。
+
+### 边界与未验证项
+这次验证使用 RPM 解包的独立 box64，不代表已替换系统 `/usr/bin/box64`；容器当前仍由 update-alternatives 指向旧 `/usr/local/libexec/box64/box64-0.4.4`。系统 RPM 安装需要管理员授权，本轮未安装，也未重启 Steam / 图形会话；需在容器执行 `sudo dnf install --nogpgcheck /home/Gold/Droidspaces-rootfs-KDE-builder/artifacts/box64-armada-0.4.4-2.fc44.aarch64.rpm` 后做用户正常 Steam 启动确认。本次离屏测试设置了独立 `XDG_DATA_HOME`，但借用运行中的 Steam 客户端；日志出现 cloud-save 同步提示，未据此声称 Steam Cloud 端到端隔离已验证。构建镜像尚未重建，改动未 commit / push；仓库状态仍为本地未提交改动。
+
+## 2026-11-24 32 位 box64、FEX 接入镜像、binfmt 单一真源
+
+- **box64 开 BOX32**：`build-box64.sh` 加 `-DBOX32=ON` 与补丁 `box32-sched-cpualloc.patch`（补 `__sched_cpualloc/__sched_cpufree`，否则 32 位 guest 的 PLT resolver 直接 abort），spec 同步。
+- **补丁目录是唯一真源**：镜像曾只 COPY 一个 `.patch`、循环却按文件名 glob，导致 `box32` 补丁在镜像里从不应用。现在 COPY 整个 `patches/`，脚本用 `PATCH_DIR`（脚本目录 → `/usr/local/share/armada/box64` 回退）。
+- **binfmt 条目单一真源**：新增 `box64-binfmt.conf`（x86 + x86-64），由 `build-box64.sh` 装到 `/usr/lib/binfmt.d/`，`box64-binfmt` 单元、镜像、RPM 都读同一份；开机只注册 x86-64 的老问题随之消失。
+- **FEX 接入镜像**（Dockerfile 第 8f 节）：`scripts/armada/fex` → `/usr/local/libexec/fex`，跑 `build-fex.sh --install --thunks` + `install-x86-64-libs.sh`，装 `/usr/local/bin/steam-fex`，清 `/var/tmp` 临时树。
+- **不再提供 FEX 兼容层**：删掉 FEX 的 `compatibilitytool.vdf` / `toolmanifest.vdf` / `fex-run`。FEX 只负责 Steam 本体和 x86 图形测试；`armada-game-launch` 仅在 `ARMADA_X86_TOOL=fex` 时才走 FEX 层，并把选择打到 stderr。
+- **审查修正**：`fex-binfmt` 与 `box64-binfmt` 改为按 interpreter 注销（原名列表漏了遗留的 `box64`）；`install-zink.sh` 的 mesa/llvm soname 改 glob（原本写死 26.0.3/22.1，镜像升级即挂）、结束清理 `/var/tmp`；`fex-deps.py` 缺 `readelf` 时报错而非输出 COMPLETE；`build-fex.sh` 补丁循环加空目录保护并清理旧的 `/usr/local/lib/binfmt.d/FEX-*.conf`。
