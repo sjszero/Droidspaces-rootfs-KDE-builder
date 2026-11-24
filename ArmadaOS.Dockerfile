@@ -1043,17 +1043,30 @@ Categories=System;
 StartupNotify=false
 EOF_DESKTOP2
 
+# Container self-check / repair, shipped with the image: the scripts land in
+# /usr/local/bin, the entry in the application menu and on the desktop. Double
+# clicking it opens the GUI menu (check only / check and repair), so it never
+# overwrites anything on a single click.
+COPY scripts/armada/container-setup/armada-container-setup.sh /usr/local/bin/armada-container-setup
+COPY scripts/armada/container-setup/armada-container-setup-gui.sh /usr/local/bin/armada-container-setup-gui
+COPY scripts/armada/container-setup/armada-container-setup.desktop /usr/share/applications/armada-container-setup.desktop
+RUN chmod 0755 /usr/local/bin/armada-container-setup /usr/local/bin/armada-container-setup-gui && \
+    chmod 0644 /usr/share/applications/armada-container-setup.desktop && \
+    bash -n /usr/local/bin/armada-container-setup && \
+    bash -n /usr/local/bin/armada-container-setup-gui
+
 # Both launchers also have to exist on the build user's desktop: the Plasma
 # desktop applet renders the contents of ~/Desktop, so a panel entry alone
 # leaves no visible way to switch modes or shut the container down. The
 # standalone game-mode launcher (armada-anland-game-mode) is deliberately not
 # copied: it starts a nested gamescope over an existing session and does nothing
 # useful here, while 切换到大屏幕模式 goes through container-request and does the
-# full session handover.
+# full session handover. The self-check entry is copied as well, so a fresh
+# container has it on the desktop without the user having to dig in the menu.
 RUN set -eux; \
     install -d -m 0755 -o "${USERNAME}" -g "${USERNAME}" "/home/${USERNAME}/Desktop"; \
     rm -f "/home/${USERNAME}/Desktop/armada-anland-game-mode.desktop"; \
-    for entry in armada-return-to-gamemode armada-container-poweroff; do \
+    for entry in armada-return-to-gamemode armada-container-poweroff armada-container-setup; do \
         install -m 0755 -o "${USERNAME}" -g "${USERNAME}" \
             "/usr/share/applications/${entry}.desktop" \
             "/home/${USERNAME}/Desktop/${entry}.desktop"; \

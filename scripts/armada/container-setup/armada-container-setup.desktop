@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ArmadaOS 容器自检
+Name[en]=ArmadaOS container self-check
+Comment=只检查，或检查并修复容器的运行时配置（box64 / binfmt / FEX / proton / Steam 映射）
+Comment[en]=Check, or check and repair, the container runtime configuration
+Exec=/usr/local/bin/armada-container-setup-gui
+Terminal=false
+Icon=system-software-update
+Categories=System;
+StartupNotify=true
