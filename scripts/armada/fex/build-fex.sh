@@ -409,8 +409,10 @@ if [[ ! -x "$BIN" ]]; then
 fi
 # Strip in place: the build tree is discarded by the image build anyway.
 strip --strip-unneeded "$BIN" || true
-VERSION=$("$BIN" --version 2>&1 | sed -nE 's/.*([0-9]{4}\.[0-9]{2}-?[0-9]*).*/\1/p' | head -1)
-NAME="FEX-${VERSION:-${COMMIT:0:12}}"
+# No `--version` probe: this frontend takes its first argument as the guest
+# program, so `FEX --version` really tries to exec something called `--version`
+# and exits 248. The pinned commit is the identity of the build.
+NAME="FEX-${COMMIT:0:12}"
 mv -- "$BIN" "$DEST/bin/$NAME"
 
 # /usr/bin/FEX is a real file, not an alternatives link.
@@ -569,7 +571,11 @@ if [[ $THUNKS == 1 ]]; then
     done
 fi
 
-/usr/bin/FEX --version || true
+# Structural check instead of `--version` (see above): the pieces FEX resolves at
+# runtime have to sit beside the interpreter.
+for path in /usr/bin/FEX /usr/bin/FEXServer /usr/bin/FEXBash "$DEST/bin/$NAME"; do
+    [[ -x $path ]] || { printf 'fex: missing %s after install\n' "$path" >&2; exit 1; }
+done
 echo "installed: $DEST/bin/$NAME"
 echo "on PATH: /usr/bin/FEX, /usr/bin/FEXInterpreter, /usr/local/bin/FEX"
 echo "rootfs: remember to run install-x86-64-libs.sh, FEX needs an x86-64 loader in its RootFS"

@@ -1867,7 +1867,14 @@ set -eux
 /usr/local/libexec/fex/install-x86-64-libs.sh
 install -d -m 0755 /usr/local/bin
 install -m 0755 /usr/local/libexec/fex/steam-fex.sh /usr/local/bin/steam-fex
-/usr/bin/FEX --version
+# FEX has no --version in this configuration (its first argument is the guest
+# program), so verify the installed pieces instead of asking the binary.
+test -x /usr/bin/FEX
+test -L /usr/bin/FEXInterpreter
+test -d /usr/local/lib64/fex-emu/HostThunks
+test -d /usr/local/share/fex-emu/GuestThunks
+test -d /usr/lib/fex-emu/rootfs/usr/lib64
+ls -l /usr/bin/FEX /usr/local/share/fex-emu/Config.json
 # Scratch trees are a few hundred MB each and must not reach the layer.
 rm -rf /var/tmp/fex-build /var/tmp/fex-x86-64-rootfs /var/tmp/fex-zink
 dnf clean all
