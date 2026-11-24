@@ -1875,8 +1875,10 @@ test -d /usr/local/lib64/fex-emu/HostThunks
 test -d /usr/local/share/fex-emu/GuestThunks
 test -d /usr/lib/fex-emu/rootfs/usr/lib64
 ls -l /usr/bin/FEX /usr/local/share/fex-emu/Config.json
-# Scratch trees are a few hundred MB each and must not reach the layer.
-rm -rf /var/tmp/fex-build /var/tmp/fex-x86-64-rootfs /var/tmp/fex-zink
+# Nothing build-only may reach the layer: the scratch trees, and the x86-64 sysroot
+# build-fex.sh assembles for the guest thunks (215 MB in /opt/x86-dev-rootfs, used
+# only at compile time -- the thunk .so files are already installed).
+rm -rf /var/tmp/fex-build /var/tmp/fex-x86-64-rootfs /var/tmp/fex-zink /opt/x86-dev-rootfs
 dnf clean all
 EOF_FEX
 
