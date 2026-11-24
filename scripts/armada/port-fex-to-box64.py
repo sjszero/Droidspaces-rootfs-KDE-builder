@@ -261,7 +261,7 @@ def armada_x86_tool(game_id):
     # divergence between this choice and what the user expects is otherwise silent.
     forced = os.environ.get("ARMADA_X86_TOOL", "").strip().lower()
     tool = forced if forced in ("box64", "fex") else "box64"
-    os.write(2, ("armada-game-launch: x86 layer = " + tool + "\n").encode())
+    os.write(2, ("armada-game-launch: x86 layer = " + tool + chr(10)).encode())
     return tool
 def resolve_fex_config(settings, profiles):
     profile_id = settings.get("fexProfile")
@@ -924,7 +924,21 @@ def post_port_steps(failures):
     port_fex_presets(failures)
 
 
+def verify_embedded_code():
+    """Fail before touching anything when an embedded blob is malformed.
+
+    FEX_FUNCS/FEX_TWEAKS are Python source written into another file, so a stray
+    escape here only shows up much later, as a syntax error in the launcher (once:
+    an escaped newline inside armada_x86_tool produced "unterminated string
+    literal" after the whole port had already run).
+    """
+    prelude = 'import json, os, pathlib, re, sys\n'
+    for name, blob in (('FEX_FUNCS', FEX_FUNCS), ('FEX_TWEAKS', FEX_TWEAKS)):
+        compile(prelude + blob, name, 'exec')
+
+
 def main():
+    verify_embedded_code()
     if not PLUGIN.is_dir():
         print('port-fex-to-box64: decky plugin missing; nothing to port')
         return 0
