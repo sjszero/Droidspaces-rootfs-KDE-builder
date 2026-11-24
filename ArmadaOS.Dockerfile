@@ -1752,10 +1752,10 @@ RUN set -eux; \
 #                  SIGILL on an unimplemented opcode. 0.4.4 implements it.
 #   binfmt handler systemd-binfmt is static and only starts when
 #                  /proc/sys/fs/binfmt_misc is already a mountpoint, which nothing
-#                  mounts in a container, so this unit mounts it and registers
-#                  box64 itself. FEX also claims x86-64 through its own binfmt.d
-#                  entry; box64 is re-registered last so the winner is
-#                  deterministic.
+#                  mounts in a container, so this unit mounts it and registers the
+#                  entries from /usr/lib/binfmt.d/box64.conf (x86 and x86-64).
+#                  FEX can claim the same ELF magic; binfmt_misc prefers the handler
+#                  registered last, and fex-binfmt (section 8f) switches using that.
 #   x86-64 libs    only what box64 has no wrapper for: the C++ runtime, ICU and
 #                  the curl chain (~41 MB extracted from Fedora RPMs). libc, Mesa,
 #                  Vulkan, X11 and OpenSSL stay native, so no x86 Mesa and no
@@ -1776,6 +1776,8 @@ RUN if [ -f /etc/box64.box64rc ] && [ ! -f /etc/box64.box64rc.distro ]; then \
         cp -a /etc/box64.box64rc /etc/box64.box64rc.distro; \
     fi
 COPY scripts/armada/box64/box64.box64rc /etc/box64.box64rc
+COPY scripts/armada/box64/patches/ /usr/local/share/armada/box64/
+COPY scripts/armada/box64/box64-binfmt.conf /usr/local/share/armada/box64/box64-binfmt.conf
 COPY scripts/armada/box64/build-box64.sh /usr/local/sbin/build-box64
 COPY scripts/armada/box64/install-x86-64-libs.sh /usr/local/sbin/install-box64-x86-64-libs
 COPY scripts/armada/box64/box64-binfmt /usr/libexec/armada/box64-binfmt
@@ -1794,7 +1796,9 @@ for script in /usr/local/sbin/build-box64 /usr/local/sbin/install-box64-x86-64-l
     bash -n "$script"
 done
 
-BOX64_COMMIT="${BOX64_COMMIT:?ARG BOX64_COMMIT must be set}" /usr/local/sbin/build-box64 --jobs "$(nproc)" --install
+BOX64_COMMIT="${BOX64_COMMIT:?ARG BOX64_COMMIT must be set}" \
+    BOX64_PATCH_DIR=/usr/local/share/armada/box64 \
+    /usr/local/sbin/build-box64 --jobs "$(nproc)" --install
 /usr/local/sbin/install-box64-x86-64-libs
 /usr/bin/box64 --version
 systemctl enable box64-binfmt.service

@@ -1,0 +1,45 @@
+diff --git a/src/wrapped32/wrappedlibc.c b/src/wrapped32/wrappedlibc.c
+index f401bb9b8..7a2481a2d 100755
+--- a/src/wrapped32/wrappedlibc.c
++++ b/src/wrapped32/wrappedlibc.c
+@@ -3762,3 +3762,17 @@ void libc32_net_init();
+     my32_stderr = to_ptrv(my__IO_2_1_stderr_);
+ 
+ #include "wrappedlib_init32.h"
++
++// glibc exports __sched_cpualloc/__sched_cpufree but box64 left them unexported
++// (upstream TODO about the cpu_set_t layout), which makes the 32-bit guest PLT
++// resolver abort with:
++//   [BOX32] Error: PltResolver32: Symbol __sched_cpualloc ... not found
++// Steam's 32-bit client hits exactly that. Allocate from guest memory so the
++// returned pointer is usable guest-side whichever function consumes it.
++EXPORT void* my32___sched_cpualloc(size_t size) {
++    return box32_calloc(1, size ? size : 128);
++}
++
++EXPORT void my32___sched_cpufree(void* ptr) {
++    box32_free(ptr);
++}
+diff --git a/src/wrapped32/wrappedlibc_private.h b/src/wrapped32/wrappedlibc_private.h
+index 202208e0a..2c0d7bcea 100755
+--- a/src/wrapped32/wrappedlibc_private.h
++++ b/src/wrapped32/wrappedlibc_private.h
+@@ -1474,9 +1474,9 @@ GO(__sbrk, pEl)
+ GOM(scandir, iEEpppp) //%%
+ GOM(scandir64, iEEpppp) //%%
+ //GO2(scanf, iEpp, vscanf)
+-//GO(__sched_cpualloc, pEu)   //TODO: check, return cpu_set_t* : should this be aligned/changed?
++GOM(__sched_cpualloc, pEL) //%noE
+ GO(__sched_cpucount, iEup)
+-//GO(__sched_cpufree, vEp)
++GOM(__sched_cpufree, vEp) //%noE
+ GOM(sched_getaffinity, iEEiLp)
+ GOM(sched_getcpu, iEEv)
+ GO(__sched_getparam, iEip)
+@@ -2257,4 +2257,4 @@ GOM(lstat, iEpp)    //%%,noE
+ //GO(setprogname,
+ //GO(getprogname,
+ 
+-DATAM(__libc_single_threaded, 4)	//B type
++DATAM(__libc_single_threaded, 4)	//B type
+\ No newline at end of file

@@ -21,7 +21,7 @@
 
 Name:           box64-armada
 Version:        0.4.4
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        box64 x86-64 emulator plus the ArmadaOS x86-64 game runtime
 
 License:        MIT
@@ -37,6 +37,9 @@ Source5:        box64-run
 Source6:        compatibilitytool.vdf
 Source7:        toolmanifest.vdf
 Source8:        README.md
+Source9:        box64-binfmt.conf
+Patch0:         proc-self-maps.patch
+Patch1:         box32-sched-cpualloc.patch
 
 ExclusiveArch:  aarch64
 
@@ -60,29 +63,37 @@ BuildRequires:  cmake
 BuildRequires:  gcc
 BuildRequires:  gcc-c++
 BuildRequires:  make
+BuildRequires:  patch
 
 %description
 box64 emulates an x86-64 user space on aarch64, and this package is the whole
 runtime ArmadaOS needs to play x86-64 Linux games inside the container:
 
-  * box64 0.4.4 built from upstream commit %{commit} with the arm64 dynarec on;
+  * box64 0.4.4 built from upstream commit %{commit} with the arm64 dynarec and the
+    32-bit (BOX32) front end on, so the 32-bit Steam client and x86-64 games both
+    run;
   * /etc/box64.box64rc tuned and measured on this hardware (DYNAREC_STRONGMEM=1
     is what keeps CoreCLR games alive, DYNAREC_SAFEFLAGS=0 is the only setting
     that measured faster; see the file itself for the numbers);
   * the x86-64 libraries box64 cannot wrap onto the host's aarch64 ones
     (libstdc++, libgcc, ICU, the curl chain) in /usr/lib/box64-x86_64-linux-gnu,
     which is the path box64 hardcodes;
-  * the binfmt_misc registration, mounted and re-registered deterministically so
-    it beats FEX's own x86-64 handler regardless of boot order;
+  * the binfmt_misc registration for both x86 and x86-64 (/usr/lib/binfmt.d/
+    box64.conf), mounted by the unit because nothing else mounts binfmt_misc at
+    boot;
   * the "box64 (Armada)" Steam compatibility tool, so a game only needs its
     properties switched to it.
 
 %prep
-%setup -q -n box64-%{commit}
+%autosetup -p1 -n box64-%{commit}
 
 %build
+# BOX32 is the i386 front end. It is experimental upstream, and it is what the image
+# uses, so the package has to match the image -- without it the 32-bit Steam client
+# cannot run at all.
 cmake -S . -B build \
     -DARM_DYNAREC=ON \
+    -DBOX32=ON \
     -DNOGIT=ON \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build --parallel %{?_smp_build_ncpus}%{!?_smp_build_ncpus:4}
@@ -100,6 +111,7 @@ install -Dpm 0755 %{SOURCE5} %{buildroot}%{_datadir}/steam/compatibilitytools.d/
 install -Dpm 0644 %{SOURCE6} %{buildroot}%{_datadir}/steam/compatibilitytools.d/box64-armada/compatibilitytool.vdf
 install -Dpm 0644 %{SOURCE7} %{buildroot}%{_datadir}/steam/compatibilitytools.d/box64-armada/toolmanifest.vdf
 install -Dpm 0644 %{SOURCE8} %{buildroot}%{_docdir}/%{name}/README.md
+install -Dpm 0644 %{SOURCE9} %{buildroot}%{_prefix}/lib/binfmt.d/box64.conf
 install -Dpm 0644 LICENSE %{buildroot}%{_licensedir}/%{name}/LICENSE
 
 # box64 looks for these in /usr/lib/box64-x86_64-linux-gnu (hardcoded in core.c),
@@ -135,7 +147,7 @@ systemctl enable box64-binfmt.service >/dev/null 2>&1 || :
 # the interpreter to the new binary.
 systemctl restart box64-binfmt.service >/dev/null 2>&1 || :
 
-if [ -e /proc/sys/fs/binfmt_misc/box64 ]; then
+if [ -e /proc/sys/fs/binfmt_misc/box64-x86_64 ]; then
     echo "box64-armada: $(/usr/bin/box64 --version 2>&1 | head -1)"
     echo "box64-armada: binfmt_misc handler registered; x86-64 binaries run through box64."
 else
@@ -151,9 +163,10 @@ if [ "$1" -eq 0 ]; then
     systemctl disable box64-binfmt.service >/dev/null 2>&1 || :
     # Leaving a handler behind that points at a removed /usr/bin/box64 makes every
     # x86-64 exec fail with ENOENT instead of ENOEXEC, which is harder to read.
-    if [ -e /proc/sys/fs/binfmt_misc/box64 ]; then
-        echo -1 >/proc/sys/fs/binfmt_misc/box64 || :
-    fi
+    for entry in box64-x86_64 box64-i386 box64; do
+        [ -e /proc/sys/fs/binfmt_misc/$entry ] || continue
+        echo -1 >/proc/sys/fs/binfmt_misc/$entry || :
+    done
 fi
 
 %postun
@@ -164,12 +177,21 @@ systemctl daemon-reload >/dev/null 2>&1 || :
 %config(noreplace) %{_sysconfdir}/box64.box64rc
 %{_libexecdir}/armada/box64-binfmt
 %{_unitdir}/box64-binfmt.service
+%{_prefix}/lib/binfmt.d/box64.conf
 %{_prefix}/lib/box64-x86_64-linux-gnu
 %{_datadir}/steam/compatibilitytools.d/box64-armada
 %doc %{_docdir}/%{name}/README.md
 %license %{_licensedir}/%{name}/LICENSE
 
 %changelog
+* Tue Nov 24 2026 Gold <gold@armadaos> - 0.4.4-2
+- Turn the 32-bit (BOX32) front end on and add box32-sched-cpualloc.patch: without
+  the __sched_cpualloc/__sched_cpufree wrappers the 32-bit guest PLT resolver
+  aborts on the Steam client.
+- Add proc-self-maps.patch: /proc/self/maps now names anonymous ELF segments, which
+  is how .NET's Process.Modules finds libclrjit, so Harmony patches stop failing.
+- Ship /usr/lib/binfmt.d/box64.conf (x86 + x86-64) and have the unit read it
+  instead of one hardcoded x86-64 entry named "box64".
 * Thu Nov 19 2026 Gold <gold@armadaos> - 0.4.4-1
 - Package the whole box64 runtime: emulator, tuned rcfile, x86-64 libraries,
   binfmt registration and the Steam compatibility tool.

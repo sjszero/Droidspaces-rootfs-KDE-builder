@@ -1,0 +1,186 @@
+--- a/src/elfs/elfloader.c
++++ b/src/elfs/elfloader.c
+@@ -1831,46 +1831,52 @@
+ }
+ 
+ 
+-void CreateMemorymapFile(box64context_t* context, int fd)
+-{
+-    // this will tranform current memory map
+-    // by anotating anonymous entry that belong to emulated elf
+-    // also anonymising current stack
+-    // and setting emulated stack as the current one
++int CreateMemorymapFile(box64context_t* context, FILE* out)
++{
++    FILE* maps = fopen("/proc/self/maps", "r");
++    if(!maps)
++        return -1;
+ 
+     char* line = NULL;
+-    size_t len = 0;
+-    char buff[1024];
+-    int dummy;
+-    FILE* f = fopen("/proc/self/maps", "r");
+-    if(!f)
+-        return;
+-    while(getline(&line, &len, f)>0) {
+-        // line is like
+-        // aaaadd750000-aaaadd759000 r-xp 00000000 103:02 13386730                  /usr/bin/cat
++    size_t capacity = 0;
++    while(getline(&line, &capacity, maps) >= 0) {
+         uintptr_t start, end;
+-        if (sscanf(line, "%zx-%zx", &start, &end)==2) {
+-            elfheader_t* h = FindElfAddress(my_context, start);
+-            int l = strlen(line);
+-            if(h && l<73) {
+-                sprintf(buff, "%s%*s\n", line, 74-l, h->name);
+-                dummy = write(fd, buff, strlen(buff));
+-            } else if(start==(uintptr_t)my_context->stack) {
+-                sprintf(buff, "%s%*s\n", line, 74-l, "[stack]");
+-                dummy = write(fd, buff, strlen(buff));
+-            } else if (strstr(line, "[stack]")) {
+-                char* p = strstr(line, "[stack]")-1;
+-                while (*p==' ' || *p=='\t') --p;
+-                p[1]='\0';
+-                strcat(line, "\n");
+-                dummy = write(fd, line, strlen(line));
+-            } else {
+-                dummy = write(fd, line, strlen(line));
+-            }
+-        }
+-    }
+-    fclose(f);
+-    (void)dummy;
++        int header_len = 0;
++        // Skip permissions, offset, device and inode, leaving the pathname (if any).
++        if(sscanf(line, "%zx-%zx %*s %*s %*s %*s%n", &start, &end, &header_len) != 2 || !header_len) {
++            fputs(line, out);
++            continue;
++        }
++        const char* path = line + header_len;
++        path += strspn(path, " \t");
++        if(!*path || *path == '\n') {
++            const char* name = NULL;
++            elfheader_t* h = FindElfAddress(context, start);
++            // Some PT_LOAD segments are copied into anonymous mappings. Give those
++            // ranges a pathname so guest module enumerators can find their code.
++            if(h && h->path && h->path[0] == '/' && end > start && FindElfAddress(context, end-1) == h)
++                name = h->path;
++            else if(start == (uintptr_t)context->stack)
++                name = "[stack]";
++            if(name) {
++                fprintf(out, "%.*s%*s", header_len, line, header_len < 73 ? 73-header_len : 1, "");
++                for(const char* newline; (newline = strchr(name, '\n')); name = newline+1) {
++                    fwrite(name, 1, newline-name, out);
++                    fputs("\\012", out);
++                }
++                fprintf(out, "%s\n", name);
++                continue;
++            }
++        } else if(!strcmp(path, "[stack]\n")) {
++            fprintf(out, "%.*s\n", header_len, line);
++            continue;
++        }
++        fputs(line, out);
++    }
++    int failed = ferror(maps) || ferror(out);
++    free(line);
++    fclose(maps);
++    return failed ? -1 : 0;
+ }
+ 
+ void ElfAttachLib(elfheader_t* head, library_t* lib)
+--- a/src/include/elfloader.h
++++ b/src/include/elfloader.h
+@@ -74,7 +74,7 @@
+ void* GetTLSPointer(x64emu_t* emu, elfheader_t* h);
+ void* GetDTatOffset(x64emu_t* emu, unsigned long int index, unsigned long int offset);
+ void ResetSpecialCaseMainElf(elfheader_t* h);
+-void CreateMemorymapFile(box64context_t* context, int fd);
++int CreateMemorymapFile(box64context_t* context, FILE* out);
+ void* GetDynamicSection(elfheader_t* h);
+ void* GetLoadedDynamicSection(elfheader_t* h);
+ void PatchLoadedDynamicSection(elfheader_t* h);
+--- a/src/wrapped/wrappedlibc.c
++++ b/src/wrapped/wrappedlibc.c
+@@ -2268,14 +2268,46 @@
+ #define TMP_CPUTOPO "box64_tmpcputopo%d"
+ #define TMP_CLOCKSOURCE "box64_tmpclocksource"
+ #endif
+-#define TMP_MEMMAP  "box64_tmpmemmap"
+ #define TMP_CMDLINE "box64_tmpcmdline"
+ #define TMP_CPUPRESENT "box64_cpupresent"
+ #define TMP_CPUCACHE_ASSOC "box64_cpucacheassoc"
+ #define TMP_CPUCACHE_COHER "box64_cpucachecoher"
+ #define TMP_CPUCACHE_SIZE "box64_cpucachesize"
++static int open_guest_maps(x64emu_t* emu, const char* path, int flags)
++{
++    if((flags & ~(O_CLOEXEC | O_LARGEFILE | O_NONBLOCK)) || !isProcSelf(path, "maps"))
++        return -1;
++
++    FILE* snapshot = NULL;
++#ifdef __NR_memfd_create
++    int tmp = syscall(__NR_memfd_create, "box64-maps", MFD_CLOEXEC);
++    if(tmp >= 0) {
++        snapshot = fdopen(tmp, "w");
++        if(!snapshot)
++            close(tmp);
++    }
++#endif
++    if(!snapshot)
++        snapshot = tmpfile();
++    if(!snapshot)
++        return -1;
++
++    int fd = -1;
++    if(CreateMemorymapFile(emu->context, snapshot) == 0 && fflush(snapshot) == 0) {
++        // Reopen read-only with its own offset and the caller's close-on-exec flag.
++        char fd_path[64];
++        snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fileno(snapshot));
++        fd = open(fd_path, flags);
++    }
++    fclose(snapshot);
++    return fd;
++}
++
+ EXPORT int32_t my_open(x64emu_t* emu, void* pathname, int32_t flags, uint32_t mode)
+ {
++    int maps = open_guest_maps(emu, pathname, flags);
++    if(maps >= 0)
++        return maps;
+     if(isProcSelf((const char*) pathname, "cmdline")) {
+         // special case for self command line...
+         #if 0
+@@ -2419,6 +2451,9 @@
+ 
+ EXPORT int32_t my_open64(x64emu_t* emu, void* pathname, int32_t flags, uint32_t mode)
+ {
++    int maps = open_guest_maps(emu, pathname, flags);
++    if(maps >= 0)
++        return maps;
+     if(isProcSelf((const char*)pathname, "cmdline")) {
+         // special case for self command line...
+         #if 0
+@@ -2525,14 +2560,14 @@
+     if(isProcSelf((const char*)path, "exe")) {
+         return fopen64(emu->context->fullpath, mode);
+     }
+-    if(isProcSelf(path, "maps")) {
+-        // special case for self memory map
+-        int tmp = shm_open(TMP_MEMMAP, O_RDWR | O_CREAT, S_IRWXU);
+-        if(tmp<0) return fopen64(path, mode); // error fallback
+-        shm_unlink(TMP_MEMMAP);    // remove the shm file, but it will still exist because it's currently in use
+-        CreateMemorymapFile(emu->context, tmp);
+-        lseek(tmp, 0, SEEK_SET);
+-        return fdopen(tmp, mode);
++    if(mode[0] == 'r' && !strchr(mode, '+')) {
++        int maps = open_guest_maps(emu, path, strchr(mode, 'e') ? O_RDONLY | O_CLOEXEC : O_RDONLY);
++        if(maps >= 0) {
++            FILE* f = fdopen(maps, mode);
++            if(!f)
++                close(maps);
++            return f;
++        }
+     }
+     #ifndef NOALIGN
+     if(strcmp(path, "/proc/cpuinfo")==0) {

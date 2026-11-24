@@ -88,6 +88,11 @@ tar -czf "$SOURCES/box64-x86_64-libs.tar.gz" -C "$LIBS_DIR" --owner=0 --group=0 
 log "libs: $count files, $(du -h "$SOURCES/box64-x86_64-libs.tar.gz" | cut -f1)"
 
 # --- files that come straight out of the repo -------------------------------
+for patch_file in "$ARMDIR"/patches/*.patch; do
+    [[ -f $patch_file ]] || continue
+    install -m 0644 "$patch_file" "$SOURCES/${patch_file##*/}"
+done
+install -m 0644 "$ARMDIR/box64-binfmt.conf" "$SOURCES/box64-binfmt.conf"
 install -m 0644 "$ARMDIR/box64.box64rc" "$SOURCES/box64.box64rc"
 install -m 0755 "$ARMDIR/box64-binfmt" "$SOURCES/box64-binfmt"
 install -m 0644 "$ARMDIR/box64-binfmt.service" "$SOURCES/box64-binfmt.service"

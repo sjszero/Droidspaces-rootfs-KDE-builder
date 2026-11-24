@@ -1,5 +1,5 @@
 [Unit]
-Description=Register the x86-64 emulator (box64) with binfmt_misc
+Description=Register the x86 / x86-64 emulator (box64) with binfmt_misc
 Documentation=file:/usr/share/doc/armada/box64.md
 # Nothing in the early boot sequence needs this, but every x86-64 game does, so
 # bring it up with the session infrastructure instead of on first use.
@@ -11,7 +11,7 @@ ConditionPathExists=/usr/bin/box64
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/armada/box64-binfmt
-ExecStop=/bin/sh -c '[ -e /proc/sys/fs/binfmt_misc/box64 ] && echo -1 > /proc/sys/fs/binfmt_misc/box64; exit 0'
+ExecStop=/bin/sh -c 'for e in box64-x86_64 box64-i386 box64; do [ -e /proc/sys/fs/binfmt_misc/$e ] && echo -1 > /proc/sys/fs/binfmt_misc/$e; done; exit 0'
 
 [Install]
 WantedBy=multi-user.target
