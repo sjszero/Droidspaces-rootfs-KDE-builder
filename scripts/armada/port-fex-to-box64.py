@@ -645,6 +645,14 @@ def edit(path, pairs, failures):
     text = path.read_text(encoding='utf-8')
     for label, old, new, expected in pairs:
         found = text.count(old)
+        # Several anchors are a prefix of their own replacement (the FEX constants after
+        # the box64 line, the fex_contract after the box64_contract call). A rerun then
+        # still matches `old` and inserts a second copy: a container that ran this three
+        # times had the constants six times over. A longer `new` already present means
+        # the edit is done.
+        if len(new) > len(old) and text.count(new) >= expected:
+            print(f'ok  {path.name}: {label} (already applied)')
+            continue
         if found != expected:
             # A rerun finds the replacement already in place and no anchor left.
             # That is the normal idempotent case, not a failure.
@@ -901,31 +909,43 @@ def port_defaults():
     print(f'ok  {DEFAULTS.name}: box64Profile default, thunks dropped')
 
 
+def post_port_steps(failures):
+    """Edits whose anchors are written by the box64 port itself.
+
+    They must run *after* port_tweaks/port_config/port_dist/port_launcher. On a
+    freshly built image the plugin still carries the FEX names, so none of those
+    anchors exist yet and the run failed with five "expected 1, found 0" errors;
+    only a container that had been ported already happened to pass. Every path runs
+    them, because a container ported by an older run still needs them too.
+    """
+    ensure_wip_defaults()
+    ensure_preset_defaults()
+    ensure_launcher_wip(failures)
+    port_fex_presets(failures)
+
+
 def main():
     if not PLUGIN.is_dir():
         print('port-fex-to-box64: decky plugin missing; nothing to port')
         return 0
-    ensure_wip_defaults()
-    ensure_preset_defaults()
-    migration_failures = []
-    ensure_launcher_wip(migration_failures)
-    port_fex_presets(migration_failures)
-    if migration_failures:
-        print('port-fex-to-box64 FAILED (launcher migration):', file=sys.stderr)
-        for item in migration_failures:
-            print(' -', item, file=sys.stderr)
-        return 1
     if CONFIG.exists() and 'box64Profiles' in CONFIG.read_text(encoding='utf-8'):
         launcher_text = LAUNCH.read_text(encoding='utf-8') if LAUNCH.exists() else ''
         if 'def apply_fex(' in launcher_text:
-            print('port-fex-to-box64: already ported (box64 + FEX layer), nothing to do')
+            print('port-fex-to-box64: already ported (box64 + FEX layer); refreshing presets')
+            only_failures = []
+            post_port_steps(only_failures)
+            if only_failures:
+                print('port-fex-to-box64 FAILED:', file=sys.stderr)
+                for item in only_failures:
+                    print(' -', item, file=sys.stderr)
+                return 1
             return 0
         # The box64 side is done but the FEX layer is still missing: keep going so a
         # container that was ported before scripts/armada/fex existed picks it up.
         print('port-fex-to-box64: box64 port present, restoring the FEX layer')
         only_failures = []
         port_fex_parallel(only_failures)
-        ensure_launcher_wip(only_failures)
+        post_port_steps(only_failures)
         if only_failures:
             print('port-fex-to-box64 FAILED:', file=sys.stderr)
             for item in only_failures:
@@ -943,8 +963,8 @@ def main():
     port_dist(failures)
     port_launcher(failures)
     port_fex_parallel(failures)
-    ensure_launcher_wip(failures)
     port_defaults()
+    post_port_steps(failures)
     if failures:
         print('port-fex-to-box64 FAILED:', file=sys.stderr)
         for item in failures:

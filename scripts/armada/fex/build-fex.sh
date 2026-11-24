@@ -88,6 +88,10 @@ if [[ $THUNKS == 1 ]]; then
            libX11-devel libxcb-devel libXext-devel libXrandr-devel libXrender-devel
            libxshmfence-devel mesa-libGL-devel mesa-libEGL-devel vulkan-loader-devel
            alsa-lib-devel wayland-devel libdrm-devel)
+    # Assembling the x86-64 sysroot needs rpm2cpio/cpio, curl for the fallback path,
+    # and dnf's download command (a plugin in older dnf5 builds).
+    DEPS+=(cpio curl)
+    dnf download --help >/dev/null 2>&1 || DEPS+=(dnf5-plugins)
 fi
 ADDED=()
 for dep in "${DEPS[@]}"; do
@@ -129,7 +133,8 @@ prepare_x86_sysroot() {
     # libgcc_s.so linker script, libstdc++(-devel) the C++ runtime and headers.
     ( cd "$rpms" && dnf download --forcearch=x86_64 --destdir="$rpms" \
         glibc glibc-headers glibc-devel kernel-headers \
-        libstdc++ libstdc++-devel libgcc gcc ) || true
+        libstdc++ libstdc++-devel libgcc gcc ) \
+        || echo "fex: dnf download reported errors, verifying the sysroot anyway" >&2
     # i686 members arrive through multilib resolution; unpacking them would put
     # 32-bit libraries into the sysroot's /usr/lib and confuse the link.
     local rpm
@@ -162,8 +167,17 @@ prepare_x86_sysroot() {
         [[ -e "${X86_SYSROOT}/usr/include/${name}" ]] && continue
         ln -sfn "$entry" "${X86_SYSROOT}/usr/include/${name}"
     done
+    # Only mark the sysroot ready when it can actually link. dnf's download failure
+    # used to be swallowed and the marker written anyway, so the build died half an
+    # hour later on "cannot open crtbegin.o" with the real cause long gone.
+    local crt
+    crt=$(find "$X86_SYSROOT" -name 'crtbegin*.o' -print -quit)
+    if [[ -z $crt ]]; then
+        printf 'fex: x86-64 sysroot is incomplete (no crtbegin*.o); dnf download did not deliver\n' >&2
+        return 1
+    fi
     : > "${X86_SYSROOT}/.fex-thunk-sysroot-ready"
-    echo "x86-64 sysroot built: ${X86_SYSROOT}"
+    echo "x86-64 sysroot built: ${X86_SYSROOT} (${crt#"$X86_SYSROOT"/})"
 }
 
 # FEX's own Data/CMake/toolchain_x86_64.cmake passes -target but no sysroot, so

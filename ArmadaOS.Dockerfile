@@ -239,10 +239,19 @@ RUN set -eux; \
 # rootfs is not used either. Waydroid needs binder, lxc networking and a kernel
 # this container does not have. Their helper units are removed with them; the two
 # units above are masked because they only ever served those packages.
+#
+# fex-emu's %postun talks to the system bus, which does not exist during a build, so
+# the scriptlet failure used to abort the whole rpm transaction (and left the packages
+# half-removed). The scriptlets are skipped instead, with rpm -e as the fallback, and
+# the step fails loudly if anything is still installed.
 RUN set -eux; \
-    dnf -y remove \
-        fex-emu fex-emu-filesystem fex-emu-thunks fex-emu-utils fex-emu-devel \
-        waydroid waydroid-selinux || true; \
+    PKGS="fex-emu fex-emu-filesystem fex-emu-thunks fex-emu-utils fex-emu-devel \
+          waydroid waydroid-selinux"; \
+    dnf -y remove --setopt=tsflags=noscripts $PKGS || \
+        rpm -e --noscripts --nodeps $PKGS || true; \
+    if rpm -q fex-emu >/dev/null 2>&1 || rpm -q waydroid >/dev/null 2>&1; then \
+        echo 'the packaged FEX / Waydroid are still installed' >&2; exit 1; \
+    fi; \
     rm -rf /usr/share/fex-emu /usr/lib64/fex-emu /usr/include/FEXCore \
         /usr/share/guestos /usr/share/armada/fex-profiles.json \
         /usr/share/armada/waydroid /var/lib/waydroid \
@@ -517,7 +526,6 @@ RUN set -eux; \
     input_device_group="$(getent group 1004 | cut -d: -f1)"; \
     if [ -n "$input_device_group" ]; then groups="${groups:+$groups,}$input_device_group"; fi; \
     usermod -a -G "$groups" "${USERNAME}"; \
-
     echo "${USERNAME}:1234" | chpasswd; \
     # Share armada's Steam library and desktop data with the requested account
     # so an existing Steam install is not re-downloaded per user.
