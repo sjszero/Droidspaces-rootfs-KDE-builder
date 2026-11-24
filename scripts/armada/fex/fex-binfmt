@@ -1,0 +1,85 @@
+#!/bin/bash
+# fex-binfmt: pick which emulator binfmt_misc hands x86 / x86-64 ELF binaries to.
+#
+# box64 is the boot default. FEX is opt-in and is what Steam's 32-bit client needs:
+# the client itself is i386, and the x86-64 helpers it spawns (pressure-vessel-wrap,
+# steamwebhelper) were measured to exit silently under box64 while running normally
+# under FEX. FEX is also the side with the GL/EGL/Vulkan thunks.
+#
+# binfmt_misc prefers the handler registered *last* (measured: registering a second
+# x86-64 handler afterwards took over the exec), so switching is "drop everything
+# of both interpreters, then register the wanted set" -- idempotent, and it cannot
+# leave a stale duplicate that makes the next registration fail with EEXIST.
+# Dropping is by interpreter, not by name: the table has carried `box64`,
+# `box64-x86_64`/`box64-i386` and `FEX-*` at various points.
+#
+# Invoked as `sudo -n fex-binfmt on` by the Steam launcher and `off` again on exit,
+# so a normal login keeps box64 as the interpreter.
+set -u
+B=/proc/sys/fs/binfmt_misc
+BOX64_CONF=/usr/lib/binfmt.d/box64.conf
+FEX_CONF=/usr/lib/fex-emu/binfmt/FEX.conf
+
+die() { echo "fex-binfmt: $*" >&2; exit 1; }
+
+[[ -e $B/register ]] || die "binfmt_misc is not mounted at $B"
+# Only the two switching actions need root; `status` is read-only and must work for
+# an ordinary user (it is the quickest way to find out which side is active).
+require_root() { [[ $(id -u) -eq 0 ]] || die "must run as root (it writes to $B)"; }
+
+drop_interpreter() {
+    local want=$1 entry name interp
+    for entry in "$B"/*; do
+        name=${entry##*/}
+        case $name in register|status) continue ;; esac
+        [[ -f $entry ]] || continue
+        interp=$(sed -n 's/^interpreter //p' "$entry" 2>/dev/null | head -1)
+        [[ $interp == "$want" ]] || continue
+        echo -1 > "$entry" 2>/dev/null || true
+    done
+    return 0
+}
+
+drop_all() {
+    drop_interpreter /usr/bin/box64
+    drop_interpreter /usr/bin/FEX
+    drop_interpreter /usr/local/bin/FEX
+}
+
+register_from() {
+    local conf=$1 line
+    [[ -r $conf ]] || die "missing $conf"
+    while IFS= read -r line; do
+        [[ -n $line && $line != '#'* ]] || continue
+        # printf, not echo: the file holds literal \xHH escapes that the kernel
+        # parses itself, so nothing may expand them on the way in.
+        printf '%s' "$line" > "$B/register" || die "cannot register from $conf"
+    done < "$conf"
+}
+
+case "${1:-status}" in
+    on)
+        require_root
+        drop_all
+        register_from "$FEX_CONF"
+        echo "binfmt: x86 / x86-64 -> FEX"
+        ;;
+    off)
+        require_root
+        drop_all
+        register_from "$BOX64_CONF"
+        echo "binfmt: x86 / x86-64 -> box64 (default)"
+        ;;
+    status)
+        for entry in "$B"/*; do
+            name=${entry##*/}
+            case $name in register|status) continue ;; esac
+            [[ -f $entry ]] || continue
+            printf '%-14s %s\n' "$name" "$(sed -n 's/^interpreter //p' "$entry" | head -1)"
+        done
+        ;;
+    *)
+        echo "usage: fex-binfmt {on|off|status}" >&2
+        exit 2
+        ;;
+esac

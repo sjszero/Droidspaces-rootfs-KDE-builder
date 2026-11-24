@@ -232,12 +232,13 @@ RUN set -eux; \
         ln -sf /dev/null "/etc/systemd/user/${unit}"; \
     done
 
-# --- 2b. Drop FEX and Waydroid ---------------------------------------------
-# FEX ships a 1.3 GB x86 rootfs plus binfmt handlers that fight box64 for the
-# same ELF, and Waydroid needs binder, lxc networking and a kernel this container
-# does not have, so neither can work here. x86-64 games run on box64 instead.
-# Their helper units are removed with them; the two units above are masked
-# because they only ever served those packages.
+# --- 2b. Drop the distribution's FEX and Waydroid ---------------------------
+# The packaged fex-emu is a mainline-kernel build: openat2 is rejected outright on
+# this Android kernel, so it cannot start a guest at all. FEX is rebuilt from
+# source with the Android patches later (section 8f), and its 1.3 GB prebuilt x86
+# rootfs is not used either. Waydroid needs binder, lxc networking and a kernel
+# this container does not have. Their helper units are removed with them; the two
+# units above are masked because they only ever served those packages.
 RUN set -eux; \
     dnf -y remove \
         fex-emu fex-emu-filesystem fex-emu-thunks fex-emu-utils fex-emu-devel \
@@ -1821,6 +1822,36 @@ EOF_ENV
 rm -rf /var/tmp/box64-build /var/tmp/box64-x86-64-libs
 dnf clean all
 EOF_RUN
+
+# --- 8f. FEX: the emulator that runs Steam's own 32-bit client ----------------
+#
+# box64 runs the games, FEX runs the client. The i386 Steam binary and the x86-64
+# helpers it spawns (pressure-vessel-wrap, steamwebhelper) were measured to exit
+# silently under box64, and FEX is also the side whose GL/EGL/Vulkan thunks forward
+# to the host driver. Both interpreters claim the same ELF magic, so
+# /usr/bin/fex-binfmt switches between them for the duration of a Steam session and
+# the boot default stays box64.
+#
+# --thunks is not optional here: it cross-builds the guest-side (x86-64) libraries
+# against an x86-64 sysroot assembled from Fedora RPMs, and without them a guest
+# dlopen("libGL.so.1") finds nothing. steam-fex.sh is the launcher that switches the
+# interpreter; it ships as /usr/local/bin/steam-fex.
+#
+# No FEX Steam compatibility tool is installed on purpose: FEX is what runs the
+# client and x86-64 graphics tests, while games stay on box64 or Proton.
+COPY scripts/armada/fex /usr/local/libexec/fex
+RUN <<'EOF_FEX'
+set -eux
+/usr/local/libexec/fex/build-fex.sh --jobs "$(nproc)" --install --thunks
+/usr/local/libexec/fex/install-x86-64-libs.sh
+install -d -m 0755 /usr/local/bin
+install -m 0755 /usr/local/libexec/fex/steam-fex.sh /usr/local/bin/steam-fex
+/usr/bin/FEX --version
+# Scratch trees are a few hundred MB each and must not reach the layer.
+rm -rf /var/tmp/fex-build /var/tmp/fex-x86-64-rootfs /var/tmp/fex-zink
+dnf clean all
+EOF_FEX
+
 # --- 9. Anland gamescope (built from source, then discarded) ----------------
 # ArmadaOS ships terra-gamescope, but the Anland display backend lives in the
 # anland project and must be compiled against this exact gamescope revision.
