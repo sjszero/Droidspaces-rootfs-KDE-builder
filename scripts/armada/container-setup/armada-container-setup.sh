@@ -15,7 +15,8 @@
 #   armada-container-setup.sh --quiet            # 只输出摘要
 #   armada-container-setup.sh --list             # 列出条目 id 与标题
 #
-# 退出码：0 全部满足/已修复；1 有失败；2 有需要人工处理的项；3 已有实例在跑
+# 退出码：0 全部满足/已修复；1 有失败；2 有需要人工处理的项；3 已有实例在跑；
+#         4 只检查模式发现待修复项
 set -u
 
 usage() {
@@ -27,8 +28,6 @@ armada-container-setup.sh — ArmadaOS 容器自检/补齐
   2) 把仓库里能在「运行中的容器」使用的脚本逐条检查：已满足跳过，不满足就地修复，
      镜像内置项只报告不擅自动。
 
-printf 'STEAM_CGROUP
-'; cat /proc/2351135/cgroup 2>/dev/null | head -2
   armada-container-setup.sh                    # 同步 + 检查 + 修复
   armada-container-setup.sh --check-only       # 只检查，不改任何东西
   armada-container-setup.sh --no-sync          # 不联网，用上次同步的副本
@@ -38,8 +37,8 @@ printf 'STEAM_CGROUP
   armada-container-setup.sh --list             # 列出条目 id 与标题
   armada-container-setup.sh --sync-only        # 只同步仓库脚本
 
-printf 'STEAM_CGROUP
-'; cat /proc/2351135/cgroup 2>/dev/null | head -20 全部满足/已修复；1 有失败；2 有需要人工处理的项；3 已有实例在跑
+退出码：0 全部满足/已修复；1 有失败；2 有需要人工处理的项；3 已有实例在跑；
+        4 只检查模式发现待修复项
 EOF
 }
 
@@ -104,9 +103,19 @@ if ! flock -n 9; then
 fi
 
 # ---------- 权限 ----------
+# Passwordless sudo is not the default in this image: ask for the password once and
+# keep using an askpass helper (the GUI exports SUDO_ASKPASS for this), or let plain
+# sudo prompt on a terminal. Without either, root items are reported, not attempted.
 SUDO_OK=0
 SUDO=""
-if sudo -n true 2>/dev/null; then SUDO_OK=1; SUDO="sudo -n"; fi
+if sudo -n true 2>/dev/null; then
+    SUDO_OK=1; SUDO="sudo -n"
+elif [ -n "${SUDO_ASKPASS:-}" ] && sudo -A true 2>/dev/null; then
+    SUDO_OK=1; SUDO="sudo -A"
+elif [ -t 0 ]; then
+    SUDO_OK=1; SUDO="sudo"
+fi
+log "sudo: ${SUDO:-(不可用)}"
 
 # ---------- 仓库同步 ----------
 sync_repo() {
@@ -163,7 +172,7 @@ fix_box64_package() {
         log "/usr/bin/box64 存在但不在 RPM 数据库里（手工安装？），不自动装以免冲突"
         return 3   # 3 = 需人工
     fi
-    rpm=$(ls -1 "$SRC"/scripts/armada/box64/rpm/*.aarch64.rpm 2>/dev/null | sort -V | tail -1)
+    rpm=$(find "$SRC/scripts/armada/box64/rpm" -maxdepth 1 -name '*.aarch64.rpm' -print 2>/dev/null | sort -V | tail -1)
     [ -n "$rpm" ] || { log "仓库里没有 box64 rpm 产物（只有 spec）；需要先构建"; return 3; }
     $SUDO dnf install -y --nogpgcheck "$rpm"
 }
@@ -303,7 +312,7 @@ add box64-config      "/etc/box64.box64rc 与仓库一致"      root
 add session-control   "容器 session-control"               root
 add gamescope-startup "gamescope 启动等待脚本"             root
 add usb-manager       "Droidspaces USB Manager"            root
-add bashrc            "~/.bashrc 辅助函数"                 user
+add bashrc            "$HOME/.bashrc 辅助函数"               user
 add fex-maxbuffer     "FEX 最大 code buffer（proton 工具）" root
 add proton-tool       "proton-cachyos-11.0-arm64 工具"     root
 add steam-compat      "Steam 默认兼容工具映射"             user
@@ -345,12 +354,12 @@ for id in "${IDS[@]}"; do
     selected+=("$id")
     i=$((i+1))
 done
-[ ${#selected[@]} -gt 0 ] || { say "${C_ERR}--only 没匹配到任何条目${C_0}"; exit 2; }
+[ ${#selected[@]} -gt 0 ] || { say "${C_ERR}--only 没匹配到任何条目${C_0}"; exit 1; }
 
-n_ok=0; n_fixed=0; n_manual=0; n_failed=0
+n_ok=0; n_fixed=0; n_todo=0; n_manual=0; n_failed=0
 TSV=$(mktemp)
 trap 'rm -f "$TSV"' EXIT
-manual_list=(); failed_list=()
+todo_list=(); manual_list=(); failed_list=()
 
 for id in "${selected[@]}"; do
     idx=0
@@ -364,9 +373,9 @@ for id in "${selected[@]}"; do
     elif "$check_fn"; then
         status=ok; detail=""
     elif [ "$MODE" = check ]; then
-        status=manual; detail="待修复（只检查模式未改动）"
+        status=todo; detail="待修复（只检查模式未改动）"
     elif [ "$need" = root ] && [ "$SUDO_OK" != 1 ]; then
-        status=manual; detail="需要 root（sudo -n 不可用）"
+        status=manual; detail="需要 root（未取得提权）"
     elif ! declare -F "$fix_fn" >/dev/null; then
         status=manual; detail="镜像内置项，脚本不自动处理"
     else
@@ -382,6 +391,8 @@ for id in "${selected[@]}"; do
     case "$status" in
         ok)      n_ok=$((n_ok+1));      [ "$QUIET" = 0 ] && say "${C_OK}✓${C_0}  $title" ;;
         fixed)   n_fixed=$((n_fixed+1)); [ "$QUIET" = 0 ] && say "${C_FIX}✓${C_0}  $title ${C_FIX}已修复${C_0}" ;;
+        todo)    n_todo=$((n_todo+1)); todo_list+=("$id")
+                 [ "$QUIET" = 0 ] && say "${C_WARN}!${C_0}  $title ${C_WARN}${detail}${C_0}" ;;
         manual)  n_manual=$((n_manual+1)); manual_list+=("$id")
                  [ "$QUIET" = 0 ] && say "${C_WARN}!${C_0}  $title ${C_WARN}${detail}${C_0}" ;;
         failed)  n_failed=$((n_failed+1)); failed_list+=("$id")
@@ -391,7 +402,7 @@ for id in "${selected[@]}"; do
 done
 
 DURATION=$SECONDS
-SUMMARY="结果：${n_ok} 已满足，${n_fixed} 已修复，${n_manual} 需人工，${n_failed} 失败（${DURATION}s）"
+SUMMARY="结果：${n_ok} 已满足，${n_fixed} 已修复，${n_todo} 待修复，${n_manual} 需人工，${n_failed} 失败（${DURATION}s）"
 
 if [ "$JSON" = 1 ]; then
     python3 - "$TSV" "$REV" "$STARTED" "$DURATION" "$JSON_OUT" <<'PY'
@@ -406,7 +417,7 @@ with open(tsv, encoding='utf-8') as fh:
         items.append({'id': parts[0], 'status': parts[1], 'title': parts[2],
                       'detail': parts[3] if len(parts) > 3 else ''})
 summary = {s: sum(1 for i in items if i['status'] == s)
-           for s in ('ok', 'fixed', 'manual', 'failed')}
+           for s in ('ok', 'fixed', 'todo', 'manual', 'failed')}
 doc = {'repo': rev, 'started': started, 'duration_s': int(duration),
        'items': items, 'summary': summary}
 blob = json.dumps(doc, ensure_ascii=False, indent=2)
@@ -416,6 +427,7 @@ PY
 else
     [ "$QUIET" = 1 ] || say ""
     say "$SUMMARY"
+    [ ${#todo_list[@]} -gt 0 ] && say "待修复：${todo_list[*]}"
     [ ${#failed_list[@]} -gt 0 ] && say "失败：${failed_list[*]}"
     [ ${#manual_list[@]} -gt 0 ] && say "需人工：${manual_list[*]}"
     say "日志：$LOG"
@@ -423,4 +435,5 @@ fi
 
 [ "$n_failed" -gt 0 ] && exit 1
 [ "$n_manual" -gt 0 ] && exit 2
+[ "$n_todo" -gt 0 ] && exit 4
 exit 0
